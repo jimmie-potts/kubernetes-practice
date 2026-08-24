@@ -68,7 +68,7 @@ One gotcha to file away: editing a ConfigMap alone does NOT restart pods. Env va
 
 In phase 1's step 6, a restart served 503s: traffic reached pods whose model was still loading, because Kubernetes' only definition of "working" was "the process is running". For inference platforms this is *the* central health problem, and the fix is two probes with two different jobs:
 
-- **Readiness**: "may I receive traffic?" Fails → pod is removed from the Service's rotation. Nothing is killed. This is the routing half of your ALB target group health check, with one crucial difference: ECS also stops and replaces a task that fails its ALB check. Kubernetes separates "stop routing to it" (readiness) from "restart it" (liveness), while ECS fuses them into one blunt verdict. Readiness-without-killing has no ECS twin, and it is the property that made the zero-downtime rollout below possible.
+- **Readiness**: "may I receive traffic?" Fails → pod is removed from the Service's rotation. Nothing is killed. This is the routing half of your ALB target group health check, with one difference that matters: ECS also stops and replaces a task that fails its ALB check. Kubernetes separates "stop routing to it" (readiness) from "restart it" (liveness), while ECS fuses them into one blunt verdict. Readiness-without-killing has no ECS twin, and it is the property that made the zero-downtime rollout below possible.
 - **Liveness**: "am I beyond saving?" Fails repeatedly → kubelet restarts the container. This is the ECS container health check that replaces a task.
 
 Version 0.1.1 of fake-inference ships a way to prove the difference (a `/admin/freeze` endpoint that simulates a hung server). Load it into the data center:
