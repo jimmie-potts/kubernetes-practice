@@ -1,6 +1,6 @@
 # Forge
 
-Forge is a fictional company that hosts customer inference services on bare metal across two data centers. This repo is a learning prototype that simulates Forge's platform with local Kubernetes clusters.
+Forge is a fictional company that hosts tenant inference services on bare metal across two data centers. This repo is a learning prototype that simulates Forge's platform with local Kubernetes clusters.
 
 ## Language
 
@@ -33,3 +33,24 @@ The resource ceiling (CPU, memory, pod count) a Tenant holds in one data center.
 
 **Quota Request**:
 A Tenant's ask to raise a Quota. Only the Infra Admin can approve one.
+
+**Registry**:
+The desired-state store, one Tenant Spec per Tenant, that the Forge Console reads and applies to the data centers.
+_Avoid_: database, config store
+
+**Tenant Spec**:
+The YAML record of one Tenant's Services and Quotas across data centers.
+_Avoid_: manifest (reserved for rendered Kubernetes YAML)
+
+**Global Entry Point**:
+The host-level nginx in front of both data centers that health-checks each and routes one URL to whichever is alive.
+_Avoid_: load balancer, GSLB
+
+**fake-inference**:
+The shared sample server image every tenant Service runs. It fakes model loading and latency and serves Prometheus metrics.
+
+**chat**:
+Acme's low-latency chat Service.
+
+**jarvis**:
+Stark Industries' batch summarizer Service, deliberately sized to strain Stark's Quota.
