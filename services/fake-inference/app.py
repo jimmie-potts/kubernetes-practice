@@ -14,7 +14,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_
 from pydantic import BaseModel
 
 MODEL_NAME = os.environ.get("MODEL_NAME", "forge-tiny")
-VERSION = os.environ.get("VERSION", "0.1.0")
+VERSION = os.environ.get("VERSION", "0.1.1")
 # Seconds before the "model" is loaded and the server reports ready.
 MODEL_LOAD_SECONDS = int(os.environ.get("MODEL_LOAD_SECONDS", "10"))
 # Simulated inference latency per request (does not burn CPU).
@@ -23,6 +23,11 @@ SIMULATED_DELAY_MS = int(os.environ.get("SIMULATED_DELAY_MS", "150"))
 BURN_CPU_MS = int(os.environ.get("BURN_CPU_MS", "0"))
 
 STARTED_AT = time.monotonic()
+
+# Set by POST /admin/freeze. A frozen server keeps its process alive but fails
+# health checks, simulating a hung model server so liveness probes have
+# something real to catch.
+FROZEN = False
 
 app = FastAPI(title="fake-inference")
 
@@ -68,13 +73,28 @@ async def completions(req: CompletionRequest):
 
 @app.get("/healthz")
 async def healthz():
-    """Liveness: the process is up. Never gated on model loading."""
+    """Liveness: the process is healthy. Never gated on model loading."""
+    if FROZEN:
+        return JSONResponse({"status": "frozen"}, status_code=503)
     return {"status": "ok"}
+
+
+@app.post("/admin/freeze")
+async def freeze():
+    """Simulate a hang: stay running but fail health checks from now on.
+
+    Only a container restart clears the flag, which is the point: that is
+    exactly what a liveness probe is for."""
+    global FROZEN
+    FROZEN = True
+    return {"status": "frozen", "hint": "liveness probe should restart me"}
 
 
 @app.get("/readyz")
 async def readyz():
     """Readiness: safe to receive traffic only once the model is loaded."""
+    if FROZEN:
+        return JSONResponse({"status": "frozen"}, status_code=503)
     if not model_loaded():
         return JSONResponse({"status": "loading model"}, status_code=503)
     return {"status": "ready", "model": MODEL_NAME}
