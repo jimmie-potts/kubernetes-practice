@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chat-config
+  labels:
+    tenant: acme
+data:
+  MODEL_NAME: acme-chat-1
+  SIMULATED_DELAY_MS: "150"
+  BURN_CPU_MS: "200"

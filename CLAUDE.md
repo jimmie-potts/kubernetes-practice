@@ -4,7 +4,7 @@ A learning prototype: a multi-tenant inference platform across two simulated dat
 
 ## Working agreement
 
-Jimmie is learning Kubernetes (background: AWS ECS and GCP Cloud Run). Hybrid mode: Claude scaffolds docs, app code, and configs; Jimmie personally types every `kind`, `kubectl`, and `helm` command by following the lab docs in `docs/labs/`. Do not run cluster-mutating commands for him unless he asks. Map new concepts to ECS or Cloud Run equivalents where one exists.
+Jimmie is learning Kubernetes (background: AWS ECS and GCP Cloud Run). Hybrid mode: Claude scaffolds docs, app code, and configs; Jimmie personally types every `kind`, `kubectl`, and `helm` command by following the lab docs in `docs/labs/` (interactive HTML, ADR-0008; serve locally with `python3 -m http.server` from the repo root). Do not run cluster-mutating commands for him unless he asks. Map new concepts to ECS or Cloud Run equivalents where one exists.
 
 ## Agent skills
 

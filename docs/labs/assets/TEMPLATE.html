@@ -1,0 +1,81 @@
+<!doctype html>
+<!-- Forge lab template. Converter rules:
+  1. body gets data-lab="phase-N" (stable id: localStorage keys depend on it).
+  2. Every lab step is <section class="step" data-step="sN"> with an <h2>.
+     The checkbox is injected by lab.js; do not add one.
+  3. Every command sits alone in <pre><code>...</code></pre>, verbatim from
+     the source lab. Copy buttons are injected; never hand-write them.
+  4. Expected output goes in <details class="expected"><summary>Expected
+     output</summary>...</details> right after its command.
+  5. Optional depth goes in <details class="aside"><summary>Why ...</summary>.
+  6. Live checks: <p><button class="check" data-url="http://...">Check:
+     healthz</button></p>. Result span is injected. Only for plain HTTP GETs.
+  7. Diagrams: inline SVG inside <figure class="diagram">, using ONLY the
+     classes shown below (box, box-accent, arrow, text, small) so they follow
+     the theme. Every diagram has a <figcaption>. No external images.
+  8. Quiz: one <section class="quiz"> before the footer, 5-6 .q blocks,
+     exactly one label per q with data-correct="true", each q has a
+     div.explain (hidden). First click locks the answer.
+  9. Escape HTML entities inside <code> (&lt; &gt; &amp;).
+  10. No external requests of any kind: assets are ../-relative, no CDNs.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phase N: Title — Forge labs</title>
+<link rel="stylesheet" href="assets/lab.css">
+</head>
+<body data-lab="phase-N">
+<main>
+<nav class="crumbs"><a href="index.html">← All labs</a></nav>
+<h1>Phase N: Title</h1>
+<p class="lede">One-sentence goal. Ticket <a href="https://github.com/jimmie-potts/kubernetes-practice/issues/N">#N</a>.</p>
+<div class="chips"><span class="chip" id="progress"></span><span class="chip" id="quiz-score"></span></div>
+
+<section class="step" data-step="s1">
+<h2>Step 1: Example step title</h2>
+<p>Explanatory prose. Inline code like <code>kubectl get pods</code> uses code tags.</p>
+<pre><code>kubectl --context kind-dc-east get nodes</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<pre><code>NAME                    STATUS   ROLES           AGE   VERSION
+dc-east-control-plane   Ready    control-plane   1d    v1.36.1</code></pre>
+</details>
+<details class="aside"><summary>Why this works</summary>
+<p>Deeper explanation the reader can skip on a first pass.</p>
+</details>
+<p><button class="check" data-url="http://chat.acme.dc-east.localtest.me:8080/healthz">Check: chat /healthz</button></p>
+</section>
+
+<figure class="diagram">
+<svg viewBox="0 0 420 120" role="img" aria-label="example diagram">
+  <defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <rect class="box" x="10" y="35" width="120" height="50"/>
+  <text x="70" y="63" text-anchor="middle">laptop</text>
+  <rect class="box-accent" x="290" y="35" width="120" height="50"/>
+  <text x="350" y="57" text-anchor="middle">dc-east</text>
+  <text class="small" x="350" y="73" text-anchor="middle">kind cluster</text>
+  <path class="arrow" d="M132 60 H286"/>
+  <text class="small" x="209" y="52" text-anchor="middle">:8080</text>
+</svg>
+<figcaption>Caption stating what the picture shows.</figcaption>
+</figure>
+
+<section class="quiz">
+<h2>Check yourself</h2>
+<div class="q">
+<p class="question">1. Example question?</p>
+<label class="option"><input type="radio" name="q1"> Wrong answer</label>
+<label class="option" data-correct="true"><input type="radio" name="q1"> Right answer</label>
+<label class="option"><input type="radio" name="q1"> Wrong answer</label>
+<div class="explain" hidden>Why the right answer is right, one or two sentences.</div>
+</div>
+</section>
+
+<footer>
+<p>Forge labs · <a href="index.html">dashboard</a> · Live check buttons need the repo served locally: <code>python3 -m http.server</code> from the repo root, then open <code>http://localhost:8000/docs/labs/</code>.</p>
+</footer>
+</main>
+<script src="assets/lab.js"></script>
+</body>
+</html>

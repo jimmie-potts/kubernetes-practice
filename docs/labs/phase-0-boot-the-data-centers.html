@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phase 0: Boot the data centers — Forge labs</title>
+<link rel="stylesheet" href="assets/lab.css">
+</head>
+<body data-lab="phase-0">
+<main>
+<nav class="crumbs"><a href="index.html">← All labs</a></nav>
+<h1>Phase 0: Boot the data centers</h1>
+<p class="lede">Two running Kubernetes clusters, <code>dc-east</code> and <code>dc-west</code>, each with one control-plane node and two workers standing in for bare-metal hosts. Ticket <a href="https://github.com/jimmie-potts/kubernetes-practice/issues/2">#2</a>.</p>
+<div class="chips"><span class="chip" id="progress"></span><span class="chip" id="quiz-score"></span></div>
+
+<p>At the end, <code>kubectl</code> can talk to either data center. You type every command in this lab yourself. Expected results follow the important ones.</p>
+
+<section class="step" data-step="s1">
+<h2>Before you start</h2>
+<p>Docker Desktop must be running with WSL integration enabled for this distro. Verify:</p>
+<pre><code>docker info --format '{{.ServerVersion}}'</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>A version number means you are ready. An error mentioning "this WSL 2 distro" means: Docker Desktop, Settings, Resources, WSL integration, enable this distro, Apply &amp; Restart.</p>
+</details>
+</section>
+
+<section class="step" data-step="s2">
+<h2>Step 1: Install the tools</h2>
+<pre><code>./scripts/00-install-tools.sh</code></pre>
+<p>The script installs three binaries into <code>~/.local/bin</code> and is safe to re-run.</p>
+<details class="aside"><summary>What the three binaries do</summary>
+<ul>
+<li><code>kubectl</code>: the CLI for any Kubernetes API server. In ECS terms this is the <code>aws ecs</code> CLI, except the same binary works against every Kubernetes cluster anywhere.</li>
+<li><code>kind</code>: runs Kubernetes clusters in which every "machine" is a Docker container.</li>
+<li><code>helm</code>: a package manager for Kubernetes manifests. You will meet it in phase 5.</li>
+</ul>
+</details>
+<p>Verify:</p>
+<pre><code>kind version &amp;&amp; kubectl version --client &amp;&amp; helm version --short</code></pre>
+</section>
+
+<section class="step" data-step="s3">
+<h2>Step 2: Read the data center config</h2>
+<p>Open <a href="../../infra/kind/dc-east.yaml">infra/kind/dc-east.yaml</a>. Things to notice:</p>
+<ul>
+<li>Each entry under <code>nodes:</code> becomes one Docker container running its own kubelet and container runtime. These containers are our bare-metal hosts.</li>
+<li>The <code>control-plane</code> node will run the cluster's brain: API server, etcd, scheduler, controller manager. ECS and Cloud Run hide this half from you. Here you get to watch it work.</li>
+<li><code>extraPortMappings</code> publishes the control-plane node's ports 80 and 443 to your host as 8080 and 8443. That is the door traffic will use to enter dc-east in phase 1.</li>
+<li>The worker <code>labels</code> name a rack and zone, so later phases can schedule against topology.</li>
+</ul>
+</section>
+
+<section class="step" data-step="s4">
+<h2>Step 3: Create dc-east</h2>
+<pre><code>kind create cluster --config infra/kind/dc-east.yaml</code></pre>
+<p>The first run pulls the node image and takes a few minutes. When it finishes:</p>
+<pre><code>kubectl cluster-info --context kind-dc-east</code></pre>
+<details class="aside"><summary>Why the context is called kind-dc-east</summary>
+<p>kind wrote credentials into <code>~/.kube/config</code> under the context name <code>kind-dc-east</code>. A context bundles cluster, user, and namespace. Think of an AWS CLI profile plus region in one name.</p>
+</details>
+</section>
+
+<section class="step" data-step="s5">
+<h2>Step 4: Meet your machines</h2>
+<p>Your "bare metal":</p>
+<pre><code>docker ps --format 'table {{.Names}}\t{{.Status}}'</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Three containers: <code>dc-east-control-plane</code>, <code>dc-east-worker</code>, <code>dc-east-worker2</code>.</p>
+</details>
+<p>The same machines, as Kubernetes sees them:</p>
+<pre><code>kubectl --context kind-dc-east get nodes -o wide</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>All three nodes reach <code>Ready</code> within a minute or two.</p>
+</details>
+<p>Now look at what Kubernetes runs for itself:</p>
+<pre><code>kubectl --context kind-dc-east get pods --all-namespaces</code></pre>
+<p>These system pods are the "other Kubernetes services" from the interview diagram:</p>
+<table>
+<thead><tr><th>Pod</th><th>Job</th></tr></thead>
+<tbody>
+<tr><td><code>kube-apiserver</code></td><td>The front door. Everything, including kubectl, talks to the cluster through it.</td></tr>
+<tr><td><code>etcd</code></td><td>The database holding desired and observed state.</td></tr>
+<tr><td><code>kube-scheduler</code></td><td>Picks which node each new pod lands on. ECS calls this task placement.</td></tr>
+<tr><td><code>kube-controller-manager</code></td><td>Control loops that drive actual state toward desired state.</td></tr>
+<tr><td><code>kube-proxy</code> (one per node)</td><td>Programs each node's networking so Service IPs reach pods.</td></tr>
+<tr><td><code>kindnet</code> (one per node)</td><td>kind's built-in CNI plugin: gives every pod an IP and connects pods across nodes. kind-specific, like <code>local-path-provisioner</code>.</td></tr>
+<tr><td><code>coredns</code></td><td>Cluster-internal DNS. How Services find each other by name.</td></tr>
+<tr><td><code>local-path-provisioner</code></td><td>kind's stand-in for dynamic volume provisioning.</td></tr>
+</tbody>
+</table>
+</section>
+
+<figure class="diagram">
+<svg viewBox="0 0 460 260" role="img" aria-label="Nesting: your laptop runs Docker, Docker runs node containers, node containers run pods">
+  <rect class="box" x="6" y="6" width="448" height="248"/>
+  <text x="18" y="26">your laptop</text>
+  <rect class="box" x="22" y="38" width="416" height="204"/>
+  <text x="34" y="58">Docker</text>
+  <rect class="box-accent" x="38" y="70" width="190" height="160"/>
+  <text x="133" y="90" text-anchor="middle">dc-east-control-plane</text>
+  <rect class="box" x="52" y="102" width="162" height="26"/>
+  <text class="small" x="133" y="119" text-anchor="middle">kube-apiserver</text>
+  <rect class="box" x="52" y="134" width="162" height="26"/>
+  <text class="small" x="133" y="151" text-anchor="middle">etcd</text>
+  <rect class="box" x="52" y="166" width="162" height="26"/>
+  <text class="small" x="133" y="183" text-anchor="middle">scheduler · controller-mgr</text>
+  <text class="small" x="133" y="214" text-anchor="middle">the cluster's brain</text>
+  <rect class="box-accent" x="244" y="70" width="182" height="74"/>
+  <text x="335" y="92" text-anchor="middle">dc-east-worker</text>
+  <text class="small" x="335" y="112" text-anchor="middle">kubelet · kube-proxy · kindnet</text>
+  <text class="small" x="335" y="130" text-anchor="middle">pod containers land here</text>
+  <rect class="box-accent" x="244" y="156" width="182" height="74"/>
+  <text x="335" y="178" text-anchor="middle">dc-east-worker2</text>
+  <text class="small" x="335" y="198" text-anchor="middle">kubelet · kube-proxy · kindnet</text>
+  <text class="small" x="335" y="216" text-anchor="middle">pod containers land here</text>
+</svg>
+<figcaption>One data center: every "machine" is a Docker container on your laptop, and pods are containers inside those containers.</figcaption>
+</figure>
+
+<section class="step" data-step="s6">
+<h2>Step 5: Create dc-west</h2>
+<pre><code>kind create cluster --config infra/kind/dc-west.yaml</code></pre>
+<pre><code>kubectl config get-contexts</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Two contexts now exist.</p>
+</details>
+<details class="aside"><summary>Why the labs always pass --context</summary>
+<p><code>kubectl config use-context</code> switches the default, but the labs pass <code>--context</code> explicitly so the two data centers never blur.</p>
+</details>
+</section>
+
+<figure class="diagram">
+<svg viewBox="0 0 460 150" role="img" aria-label="kubectl reaching two clusters via two contexts">
+  <defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <rect class="box" x="10" y="50" width="130" height="50"/>
+  <text x="75" y="72" text-anchor="middle">kubectl</text>
+  <text class="small" x="75" y="88" text-anchor="middle">~/.kube/config</text>
+  <rect class="box-accent" x="310" y="10" width="140" height="54"/>
+  <text x="380" y="32" text-anchor="middle">dc-east</text>
+  <text class="small" x="380" y="50" text-anchor="middle">kind cluster</text>
+  <rect class="box-accent" x="310" y="86" width="140" height="54"/>
+  <text x="380" y="108" text-anchor="middle">dc-west</text>
+  <text class="small" x="380" y="126" text-anchor="middle">kind cluster</text>
+  <path class="arrow" d="M142 62 L306 34"/>
+  <text class="small" x="220" y="38" text-anchor="middle">--context kind-dc-east</text>
+  <path class="arrow" d="M142 78 L306 106"/>
+  <text class="small" x="220" y="110" text-anchor="middle">--context kind-dc-west</text>
+</svg>
+<figcaption>Two contexts in one kubeconfig: <code>--context</code> picks which data center kubectl talks to.</figcaption>
+</figure>
+
+<section class="step" data-step="s7">
+<h2>Checkpoint</h2>
+<pre><code>kind get clusters</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Lists <code>dc-east</code> and <code>dc-west</code>.</p>
+</details>
+<pre><code>kubectl --context kind-dc-east get nodes &amp;&amp; kubectl --context kind-dc-west get nodes</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Six nodes total, all <code>Ready</code>.</p>
+</details>
+</section>
+
+<section class="step" data-step="s8">
+<h2>If you need to reset</h2>
+<pre><code>kind delete cluster --name dc-east</code></pre>
+<p>Destroys that data center and forgets it. Rebuilding takes minutes. Resetting should feel cheap; you will do it often.</p>
+</section>
+
+<section>
+<h2>What you learned</h2>
+<ul>
+<li>A Kubernetes cluster is a control plane plus worker nodes. ECS only ever showed you the workers.</li>
+<li>kind's nodes are containers, which is how one laptop hosts two "data centers".</li>
+<li>A kubectl context selects which cluster you are talking to.</li>
+<li>Each system pod owns one job: API, state, scheduling, reconciliation, service networking, DNS.</li>
+</ul>
+</section>
+
+<section>
+<h2>ECS and Cloud Run mapping</h2>
+<table>
+<thead><tr><th>Kubernetes</th><th>AWS ECS</th><th>GCP Cloud Run</th></tr></thead>
+<tbody>
+<tr><td>Cluster</td><td>ECS cluster</td><td>Hidden behind the service</td></tr>
+<tr><td>Node</td><td>EC2 container instance</td><td>Hidden</td></tr>
+<tr><td>kubelet</td><td>ECS agent</td><td>Hidden</td></tr>
+<tr><td>Control plane</td><td>Exists, but AWS-managed and invisible</td><td>Fully managed</td></tr>
+<tr><td>kubectl context</td><td>CLI profile and region</td><td><code>gcloud config</code></td></tr>
+</tbody>
+</table>
+<p>Next: phase 1, where you deploy Acme's chat Service to dc-east by hand. Its lab doc lands when you start the ticket.</p>
+</section>
+
+<section class="quiz">
+<h2>Check yourself</h2>
+
+<div class="q">
+<p class="question">1. In this lab, what is each "bare-metal host" of a data center, really?</p>
+<label class="option"><input type="radio" name="q1"> A lightweight VM that kind boots on your laptop</label>
+<label class="option" data-correct="true"><input type="radio" name="q1"> A Docker container running its own kubelet and container runtime</label>
+<label class="option"><input type="radio" name="q1"> A separate WSL distro per node</label>
+<label class="option"><input type="radio" name="q1"> A remote machine kind provisions in the cloud</label>
+<div class="explain" hidden>Each entry under <code>nodes:</code> in the kind config becomes one Docker container with its own kubelet and container runtime. That nesting is exactly how one laptop can host two "data centers".</div>
+</div>
+
+<div class="q">
+<p class="question">2. Why do the labs always pass <code>--context</code> instead of relying on <code>kubectl config use-context</code>?</p>
+<label class="option"><input type="radio" name="q2"> <code>use-context</code> does not work with kind clusters</label>
+<label class="option"><input type="radio" name="q2"> <code>--context</code> is required once more than one cluster exists</label>
+<label class="option" data-correct="true"><input type="radio" name="q2"> A switched default is invisible; naming the context on every command keeps the two data centers from blurring</label>
+<label class="option"><input type="radio" name="q2"> It makes kubectl respond faster</label>
+<div class="explain" hidden>Both approaches work. But with two data centers, a forgotten <code>use-context</code> means commands silently land in the wrong cluster. Explicit <code>--context</code> makes the target visible in every command you type.</div>
+</div>
+
+<div class="q">
+<p class="question">3. A new pod is created. Which component picks the node it lands on, and what does ECS call that job?</p>
+<label class="option"><input type="radio" name="q3"> <code>kube-apiserver</code> — service discovery</label>
+<label class="option"><input type="radio" name="q3"> <code>kubelet</code> — the container agent</label>
+<label class="option" data-correct="true"><input type="radio" name="q3"> <code>kube-scheduler</code> — task placement</label>
+<label class="option"><input type="radio" name="q3"> <code>kube-controller-manager</code> — capacity providers</label>
+<div class="explain" hidden>The scheduler's one job is choosing a node for each new pod, which ECS calls task placement. The API server is the front door, and the controller manager drives actual state toward desired state.</div>
+</div>
+
+<div class="q">
+<p class="question">4. What does <code>extraPortMappings</code> in <code>dc-east.yaml</code> set up?</p>
+<label class="option"><input type="radio" name="q4"> It opens ports between the worker nodes so pods can talk across machines</label>
+<label class="option" data-correct="true"><input type="radio" name="q4"> It publishes the control-plane node's ports 80 and 443 to your host as 8080 and 8443 — the door traffic will use to enter dc-east</label>
+<label class="option"><input type="radio" name="q4"> It exposes the Kubernetes API server so kubectl can reach the cluster</label>
+<label class="option"><input type="radio" name="q4"> It maps each pod's port to a random host port</label>
+<div class="explain" hidden>Node containers are normally unreachable from your laptop. <code>extraPortMappings</code> pre-opens 8080/8443 on the host into the control-plane node's 80/443, so phase 1 traffic has a way in. Pod-to-pod networking is kindnet's job, and kind publishes the API server port to your laptop and writes credentials into your kubeconfig, so kubectl can already reach and authenticate to the cluster.</div>
+</div>
+
+<div class="q">
+<p class="question">5. If etcd lost its data, what would the cluster forget?</p>
+<label class="option"><input type="radio" name="q5"> Only the container images cached on each node</label>
+<label class="option"><input type="radio" name="q5"> Only cluster-internal DNS records</label>
+<label class="option" data-correct="true"><input type="radio" name="q5"> Desired and observed state — everything the cluster knows about what should run and what is running</label>
+<label class="option"><input type="radio" name="q5"> Nothing; each node keeps its own copy of cluster state</label>
+<div class="explain" hidden>etcd is the database holding desired and observed state. Images live on nodes and DNS lives in coredns, but the record of what the cluster is supposed to look like lives only in etcd.</div>
+</div>
+
+<div class="q">
+<p class="question">6. Which half of a Kubernetes cluster did ECS and Cloud Run never let you see?</p>
+<label class="option"><input type="radio" name="q6"> The worker nodes running your containers</label>
+<label class="option" data-correct="true"><input type="radio" name="q6"> The control plane: API server, etcd, scheduler, controller manager</label>
+<label class="option"><input type="radio" name="q6"> The container runtime</label>
+<label class="option"><input type="radio" name="q6"> The CLI tooling</label>
+<div class="explain" hidden>ECS only ever showed you the workers (EC2 container instances); the control plane exists but is AWS-managed and invisible, and Cloud Run hides everything. Here the control plane runs in a container you can watch.</div>
+</div>
+
+</section>
+
+<footer>
+<p>Forge labs · <a href="index.html">dashboard</a> · Live check buttons need the repo served locally: <code>python3 -m http.server</code> from the repo root, then open <code>http://localhost:8000/docs/labs/</code>.</p>
+</footer>
+</main>
+<script src="assets/lab.js"></script>
+</body>
+</html>

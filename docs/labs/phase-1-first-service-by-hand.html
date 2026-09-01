@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phase 1: First Service by hand — Forge labs</title>
+<link rel="stylesheet" href="assets/lab.css">
+</head>
+<body data-lab="phase-1">
+<main>
+<nav class="crumbs"><a href="index.html">← All labs</a></nav>
+<h1>Phase 1: First Service by hand</h1>
+<p class="lede">Goal: Acme's chat Service serving completions in dc-east through ingress-nginx, built object by object with raw kubectl. Ticket <a href="https://github.com/jimmie-potts/kubernetes-practice/issues/3">#3</a>.</p>
+<div class="chips"><span class="chip" id="progress"></span><span class="chip" id="quiz-score"></span></div>
+
+<section>
+<p>Everything happens in dc-east; dc-west sits idle until phase 4. Objects land in the <code>default</code> namespace for now. Tenant walls arrive in phase 3.</p>
+<p>The path you are building, outside in:</p>
+<pre><code>curl chat.acme.dc-east.localtest.me:8080
+  -&gt; 127.0.0.1:8080 (localtest.me wildcard DNS)
+  -&gt; Docker port map to the control-plane node's port 80
+  -&gt; ingress-nginx pod (reads Ingress objects, routes by hostname)
+  -&gt; chat Service (stable address for the pods)
+  -&gt; a chat pod (fake-inference container)</code></pre>
+<p>Each object below exists to make one hop of that path work.</p>
+<table>
+<thead>
+<tr><th>You want</th><th>Kubernetes object</th><th>ECS</th><th>Cloud Run</th></tr>
+</thead>
+<tbody>
+<tr><td>Run containers</td><td>Pod</td><td>Task</td><td>An instance of your service</td></tr>
+<tr><td>Keep N copies alive</td><td>Deployment</td><td>Service with desired count</td><td>Service with autoscaling</td></tr>
+<tr><td>One stable address for them</td><td>Service</td><td>Target group plus service discovery</td><td>The service URL</td></tr>
+<tr><td>Route outside traffic by hostname</td><td>Ingress</td><td>ALB listener rule</td><td>Domain mapping</td></tr>
+<tr><td>The router itself</td><td>ingress-nginx controller</td><td>The ALB</td><td>Google's front end</td></tr>
+</tbody>
+</table>
+</section>
+
+<section class="step" data-step="s1">
+<h2>Step 1: A pod, alone</h2>
+<p>Ask for a single pod running the fake-inference image:</p>
+<pre><code>kubectl --context kind-dc-east run chat-solo --image=forge/fake-inference:0.1.0</code></pre>
+<pre><code>kubectl --context kind-dc-east get pods</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Status shows <code>ErrImagePull</code> or <code>ImagePullBackOff</code>.</p>
+</details>
+<p>This failure is the lesson: the node's container runtime went looking for <code>forge/fake-inference:0.1.0</code> and found nothing, because the image exists only in your laptop's Docker. The cluster cannot see it.</p>
+<details class="aside"><summary>Why this maps to ECS</summary>
+<p>In ECS terms, you asked for a task whose image was never pushed to ECR.</p>
+</details>
+<p>Forge has no registry, so kind offers a shortcut that copies an image onto every node:</p>
+<pre><code>docker build -t forge/fake-inference:0.1.0 services/fake-inference/</code></pre>
+<pre><code>kind load docker-image forge/fake-inference:0.1.0 --name dc-east</code></pre>
+<p>Now watch, touching nothing else:</p>
+<pre><code>kubectl --context kind-dc-east get pods -w</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Within a minute or two the kubelet retries the pull, finds the image on its own node, and the pod flips to <code>Running</code>. Ctrl-C to stop watching.</p>
+</details>
+<p>(Retries back off, so if you are impatient: delete the pod and run it again.) You fixed the cause; reconciliation did the rest. Talk to the pod through an API-server tunnel:</p>
+<pre><code>kubectl --context kind-dc-east port-forward pod/chat-solo 18080:8000</code></pre>
+<p>In a second terminal:</p>
+<pre><code>curl localhost:18080/healthz</code></pre>
+<details class="aside"><summary>Why port-forward is not the production path</summary>
+<p><code>port-forward</code> tunnels through the control plane. It is a debug door, not a production path; customer traffic will use the ingress you build in step 4.</p>
+</details>
+<figure class="diagram">
+<svg viewBox="0 0 560 120" role="img" aria-label="port-forward tunnels through the control plane to one pod">
+  <defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <rect class="box" x="10" y="35" width="150" height="50"/>
+  <text x="85" y="57" text-anchor="middle">curl :18080</text>
+  <text class="small" x="85" y="73" text-anchor="middle">laptop</text>
+  <rect class="box" x="205" y="35" width="150" height="50"/>
+  <text x="280" y="57" text-anchor="middle">API server</text>
+  <text class="small" x="280" y="73" text-anchor="middle">control-plane tunnel</text>
+  <rect class="box-accent" x="400" y="35" width="150" height="50"/>
+  <text x="475" y="57" text-anchor="middle">chat-solo pod</text>
+  <text class="small" x="475" y="73" text-anchor="middle">fake-inference :8000</text>
+  <path class="arrow" d="M162 60 H201"/>
+  <path class="arrow" d="M357 60 H396"/>
+</svg>
+<figcaption>The port-forward debug door: traffic tunnels through the control plane to one pod. Ingress traffic never takes this path.</figcaption>
+</figure>
+<p>Ctrl-C the port-forward, then see why a bare pod is not enough:</p>
+<pre><code>kubectl --context kind-dc-east delete pod chat-solo</code></pre>
+<pre><code>kubectl --context kind-dc-east get pods</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Gone, and nothing brings it back.</p>
+</details>
+<p>No object in the cluster says "there should be a chat pod", so no control loop disagrees with an empty list. Deployments fix that.</p>
+</section>
+
+<section class="step" data-step="s2">
+<h2>Step 2: A Deployment keeps them alive</h2>
+<p>Create the file <code>deploy/tenants/acme/chat-deployment.yaml</code> yourself (typing it is the point):</p>
+<pre><code>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chat
+  labels:
+    app: chat
+    tenant: acme
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: chat
+  template:
+    metadata:
+      labels:
+        app: chat
+        tenant: acme
+    spec:
+      containers:
+        - name: fake-inference
+          image: forge/fake-inference:0.1.0
+          ports:
+            - containerPort: 8000
+          env:
+            - name: MODEL_NAME
+              value: acme-chat-1</code></pre>
+<details class="aside"><summary>Why this shape: the ECS reading</summary>
+<p>Read it as an ECS service fused with its task definition: <code>template</code> is the task definition (image, ports, env), <code>replicas</code> is desired count, and <code>selector</code> is the glue. The selector must match the template's labels; that is the contract by which the Deployment recognizes which pods are "its own".</p>
+</details>
+<pre><code>kubectl --context kind-dc-east apply -f deploy/tenants/acme/chat-deployment.yaml</code></pre>
+<pre><code>kubectl --context kind-dc-east get pods</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Two pods with generated names like <code>chat-7c9f8b6d4-x2klm</code>.</p>
+</details>
+<details class="aside"><summary>What the middle hash names</summary>
+<p>The middle hash names the ReplicaSet, an object the Deployment manages for you; you will meet it properly during rollouts in phase 2.</p>
+</details>
+<p>Now the acceptance test. Delete one pod, then immediately watch:</p>
+<pre><code>kubectl --context kind-dc-east delete $(kubectl --context kind-dc-east get pods -l app=chat -o name | head -1) &amp; kubectl --context kind-dc-east get pods -w</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>A replacement appears while the old one terminates: actual state dropped to one, desired said two, a control loop acted. Ctrl-C when it settles.</p>
+</details>
+<p>This is the same reconciliation that recovered your image pull, and it never sleeps.</p>
+</section>
+
+<section class="step" data-step="s3">
+<h2>Step 3: A Service gives them one address</h2>
+<p>Two pods, two private IPs, and both change every time a pod is replaced:</p>
+<pre><code>kubectl --context kind-dc-east get pods -o wide</code></pre>
+<p>Nothing should ever chase pod IPs. Create <code>deploy/tenants/acme/chat-service.yaml</code>:</p>
+<pre><code>apiVersion: v1
+kind: Service
+metadata:
+  name: chat
+  labels:
+    tenant: acme
+spec:
+  selector:
+    app: chat
+  ports:
+    - port: 80
+      targetPort: 8000</code></pre>
+<pre><code>kubectl --context kind-dc-east apply -f deploy/tenants/acme/chat-service.yaml</code></pre>
+<pre><code>kubectl --context kind-dc-east get svc chat</code></pre>
+<p>The <code>CLUSTER-IP</code> is a stable virtual address; kube-proxy (phase 0) programs every node to route it to whichever chat pods exist right now. It is a target group plus service discovery in one object. Prove the DNS half from inside the cluster, since a ClusterIP is not reachable from your laptop:</p>
+<pre><code>kubectl --context kind-dc-east run tester --rm -i --restart=Never --image=curlimages/curl -- curl -s http://chat/healthz</code></pre>
+<p>That pod resolved the name <code>chat</code> through coredns, hit the Service IP, and reached a pod. Services finding each other by name is how tenant microservices will talk in later phases.</p>
+</section>
+
+<section class="step" data-step="s4">
+<h2>Step 4: ingress-nginx, the shared front door</h2>
+<p>The Service is reachable only inside the cluster. Enter the nginx from the interview diagram, installed like any workload:</p>
+<pre><code>kubectl --context kind-dc-east apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.15.1/deploy/static/provider/kind/deploy.yaml</code></pre>
+<p>One correction before it can work here. Pin the controller to the port-mapped node, which our config labeled <code>ingress-ready=true</code> in phase 0:</p>
+<details class="aside"><summary>Why the controller needs pinning</summary>
+<p>Our kind config publishes ports 80/443 of the control-plane node only, but since v1.13 this manifest no longer pins the controller to a labeled node, so it may land on a worker nobody can reach (the trap recorded in ADR-0005).</p>
+</details>
+<pre><code>kubectl --context kind-dc-east -n ingress-nginx patch deployment ingress-nginx-controller -p '{"spec":{"template":{"spec":{"nodeSelector":{"ingress-ready":"true","kubernetes.io/os":"linux"}}}}}'</code></pre>
+<p>On real bare metal this is a real decision: the edge proxy must run on the machines whose ports face the world. Wait for it:</p>
+<pre><code>kubectl --context kind-dc-east -n ingress-nginx rollout status deployment/ingress-nginx-controller --timeout=180s</code></pre>
+</section>
+
+<section class="step" data-step="s5">
+<h2>Step 5: An Ingress routes your hostname</h2>
+<p>Create <code>deploy/tenants/acme/chat-ingress.yaml</code>:</p>
+<pre><code>apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: chat
+  labels:
+    tenant: acme
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: chat.acme.dc-east.localtest.me
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: chat
+                port:
+                  number: 80</code></pre>
+<p>An Ingress is an ALB listener rule: "this hostname goes to that Service".</p>
+<details class="aside"><summary>Why no packet touches the control plane</summary>
+<p>The controller watches these objects through the API server and rewrites its own nginx config; no packet ever passes through the control plane.</p>
+</details>
+<pre><code>kubectl --context kind-dc-east apply -f deploy/tenants/acme/chat-ingress.yaml</code></pre>
+<p>The moment of truth (<code>*.localtest.me</code> resolves to 127.0.0.1, and 8080 is dc-east's published port):</p>
+<pre><code>curl http://chat.acme.dc-east.localtest.me:8080/healthz</code></pre>
+<p><button class="check" data-url="http://chat.acme.dc-east.localtest.me:8080/healthz">Check: chat /healthz</button></p>
+<pre><code>curl -s -X POST http://chat.acme.dc-east.localtest.me:8080/v1/completions -H 'Content-Type: application/json' -d '{"prompt":"hello forge"}'</code></pre>
+<p>A completion, served by Acme's model, through Forge's front door. One shared nginx will serve every Tenant this way, split by hostname; that is the multi-tenant carve-up from ADR-0005.</p>
+<figure class="diagram">
+<svg viewBox="0 0 640 240" role="img" aria-label="the full request path from curl on the laptop to a chat pod">
+  <defs><marker id="arr2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <rect class="box" x="10" y="15" width="185" height="52"/>
+  <text x="102" y="37" text-anchor="middle">curl :8080</text>
+  <text class="small" x="102" y="54" text-anchor="middle">chat.acme.dc-east.localtest.me</text>
+  <rect class="box" x="225" y="15" width="185" height="52"/>
+  <text x="317" y="37" text-anchor="middle">Docker port map</text>
+  <text class="small" x="317" y="54" text-anchor="middle">host 8080 → node 80</text>
+  <rect class="box" x="440" y="15" width="185" height="52"/>
+  <text x="532" y="37" text-anchor="middle">control-plane node</text>
+  <text class="small" x="532" y="54" text-anchor="middle">:80 · ingress-ready=true</text>
+  <rect class="box-accent" x="440" y="130" width="185" height="52"/>
+  <text x="532" y="152" text-anchor="middle">ingress-nginx</text>
+  <text class="small" x="532" y="169" text-anchor="middle">routes by hostname</text>
+  <rect class="box" x="225" y="130" width="185" height="52"/>
+  <text x="317" y="152" text-anchor="middle">chat Service</text>
+  <text class="small" x="317" y="169" text-anchor="middle">:80 → targetPort 8000</text>
+  <rect class="box-accent" x="10" y="130" width="185" height="52"/>
+  <text x="102" y="152" text-anchor="middle">chat pod</text>
+  <text class="small" x="102" y="169" text-anchor="middle">fake-inference :8000</text>
+  <path class="arrow" style="marker-end:url(#arr2)" d="M197 41 H221"/>
+  <path class="arrow" style="marker-end:url(#arr2)" d="M412 41 H436"/>
+  <path class="arrow" style="marker-end:url(#arr2)" d="M532 69 V126"/>
+  <path class="arrow" style="marker-end:url(#arr2)" d="M436 156 H414"/>
+  <path class="arrow" style="marker-end:url(#arr2)" d="M221 156 H199"/>
+</svg>
+<figcaption>The full request path, outside in: localtest.me resolves to 127.0.0.1, Docker maps host 8080 to node port 80, ingress-nginx routes by hostname to the chat Service, and the Service forwards to a pod on 8000. No hop passes through the API server; the control-plane node appears here only because its published ports make it the edge machine.</figcaption>
+</figure>
+</section>
+
+<section class="step" data-step="s6">
+<h2>Step 6: The crack in the wall</h2>
+<p>fake-inference takes about ten seconds to "load its model" after starting, and right now Kubernetes has no idea. Catch it in the act. Trigger a restart of all pods, then hammer the endpoint:</p>
+<pre><code>kubectl --context kind-dc-east rollout restart deployment chat</code></pre>
+<pre><code>for i in $(seq 1 15); do curl -s -o /dev/null -w '%{http_code} ' -X POST http://chat.acme.dc-east.localtest.me:8080/v1/completions -H 'Content-Type: application/json' -d '{"prompt":"hi"}'; sleep 1; done; echo</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Mixed in with the 200s you will see 503s.</p>
+</details>
+<p>Traffic reached pods whose model was still loading, because nobody told Kubernetes what "ready" means for this container. For an inference platform, model loading time is the whole game. Readiness probes fix this in phase 2, and you have now seen exactly why they exist.</p>
+</section>
+
+<section class="step" data-step="s7">
+<h2>Checkpoint</h2>
+<pre><code>kubectl --context kind-dc-east get deploy,svc,ingress -l tenant=acme</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Deployment 2/2, Service with a ClusterIP, Ingress with your hostname.</p>
+</details>
+<p>The completions curl above returns 200 with a body naming <code>acme-chat-1</code>. Deleting a chat pod gets it replaced without your help.</p>
+<p><button class="check" data-url="http://chat.acme.dc-east.localtest.me:8080/healthz">Check: chat /healthz</button></p>
+</section>
+
+<section>
+<h2>What you learned</h2>
+<ul>
+<li>Nothing in Kubernetes "starts a container"; you declare objects and control loops make them true. The image-pull recovery and the pod replacement were the same mechanism.</li>
+<li>Pod, Deployment, Service, Ingress each solve one failure of the previous layer: death, identity, reachability.</li>
+<li>The Deployment selector and pod labels are a contract, not decoration.</li>
+<li>The ingress controller is a workload like any other; only node placement and published ports make it the front door.</li>
+<li><code>port-forward</code> goes through the control plane; ingress traffic never does.</li>
+</ul>
+<p>Next: phase 2 (<a href="https://github.com/jimmie-potts/kubernetes-practice/issues/4">#4</a>), where chat gets probes, config from ConfigMaps and Secrets, resource requests, autoscaling, and a rollback.</p>
+</section>
+
+<section class="quiz">
+<h2>Check yourself</h2>
+<div class="q">
+<p class="question">1. Your <code>kubectl run chat-solo</code> pod sits in <code>ErrImagePull</code>. What actually went wrong?</p>
+<label class="option"><input type="radio" name="q1"> The image tag in the command has a typo</label>
+<label class="option"><input type="radio" name="q1"> A bare pod cannot pull images without a Deployment managing it</label>
+<label class="option" data-correct="true"><input type="radio" name="q1"> The image exists only in your laptop's Docker; the node's container runtime cannot see it</label>
+<label class="option"><input type="radio" name="q1"> kind clusters are air-gapped and can never pull any image</label>
+<div class="explain" hidden>Nodes pull images with their own container runtime, which knows nothing about your laptop's Docker daemon. In ECS terms: a task whose image was never pushed to ECR. <code>kind load</code> copies the image onto every node, and the kubelet's retry then succeeds.</div>
+</div>
+<div class="q">
+<p class="question">2. After <code>kind load</code>, the pod flips to <code>Running</code> even though you touched nothing else. Why?</p>
+<label class="option"><input type="radio" name="q2"> <code>kind load</code> restarts every pod that uses the image</label>
+<label class="option" data-correct="true"><input type="radio" name="q2"> The kubelet keeps retrying the pull; once you fixed the cause, reconciliation converged on its own</label>
+<label class="option"><input type="radio" name="q2"> <code>kubectl run</code> re-applies the pod spec in the background until it works</label>
+<label class="option"><input type="radio" name="q2"> Docker pushed the image directly into the running pod</label>
+<div class="explain" hidden>You fixed the cause; a retry loop did the rest. It is the same mechanism that later replaces a deleted Deployment pod — control loops never stop comparing desired state to actual state.</div>
+</div>
+<div class="q">
+<p class="question">3. Deleting <code>chat-solo</code> left the cluster empty forever, but deleting a Deployment-managed pod got it replaced within seconds. What makes the difference?</p>
+<label class="option"><input type="radio" name="q3"> Deployment pods restart faster because their image is already cached</label>
+<label class="option"><input type="radio" name="q3"> The Service resurrects any pod matching its selector</label>
+<label class="option"><input type="radio" name="q3"> <code>kubectl delete</code> only pauses managed pods instead of removing them</label>
+<label class="option" data-correct="true"><input type="radio" name="q3"> With a bare pod, no object records desired state, so no control loop disagrees with the empty list</label>
+<div class="explain" hidden><code>replicas: 2</code> is standing desired state. When actual drops to one, a control loop acts. A bare pod leaves nothing behind that says "there should be a chat pod".</div>
+</div>
+<div class="q">
+<p class="question">4. Why must the Deployment's <code>selector</code> match the pod template's labels?</p>
+<label class="option"><input type="radio" name="q4"> It is only a convention so <code>kubectl get -l</code> filtering works</label>
+<label class="option" data-correct="true"><input type="radio" name="q4"> The selector is how the Deployment recognizes which pods are "its own" — without that contract, counting desired versus actual has nothing to count</label>
+<label class="option"><input type="radio" name="q4"> The Service copies its selector from the Deployment, so they must agree</label>
+<label class="option"><input type="radio" name="q4"> Labels are injected into the container as environment variables</label>
+<div class="explain" hidden>The selector and the pod labels are a contract, not decoration. It is the glue between "keep two of these" and the actual pods that count toward two.</div>
+</div>
+<div class="q">
+<p class="question">5. Why did the ingress-nginx controller need the nodeSelector patch in this cluster?</p>
+<label class="option"><input type="radio" name="q5"> ingress-nginx refuses to start on worker nodes without it</label>
+<label class="option"><input type="radio" name="q5"> The patch is what enables routing by hostname</label>
+<label class="option" data-correct="true"><input type="radio" name="q5"> Only the control-plane node's ports 80/443 are published by our kind config; unpinned, the controller can land on a worker nobody outside can reach</label>
+<label class="option"><input type="radio" name="q5"> The controller must run next to the API server to read Ingress objects</label>
+<div class="explain" hidden>Since v1.13 the kind manifest no longer pins the controller to a labeled node (the ADR-0005 trap). The controller runs fine on a worker — but no outside traffic can reach it there. The edge proxy must sit on the machine whose ports face the world.</div>
+</div>
+<div class="q">
+<p class="question">6. In step 6, some requests return 503 right after the rollout restart. Why?</p>
+<label class="option"><input type="radio" name="q6"> ingress-nginx drops all connections whenever a Deployment restarts</label>
+<label class="option"><input type="radio" name="q6"> The Service loses its ClusterIP during a restart and has to be re-created</label>
+<label class="option" data-correct="true"><input type="radio" name="q6"> Traffic reached pods whose model was still loading; nothing told Kubernetes what "ready" means for this container</label>
+<label class="option"><input type="radio" name="q6"> fake-inference returns 503 whenever it receives more than one request per second</label>
+<div class="explain" hidden>fake-inference takes about ten seconds to "load its model", and Kubernetes routed traffic to it anyway. Readiness probes in phase 2 will keep unready pods out of rotation — you have now seen exactly why they exist.</div>
+</div>
+</section>
+
+<footer>
+<p>Forge labs · <a href="index.html">dashboard</a> · Live check buttons need the repo served locally: <code>python3 -m http.server</code> from the repo root, then open <code>http://localhost:8000/docs/labs/</code>.</p>
+</footer>
+</main>
+<script src="assets/lab.js"></script>
+</body>
+</html>

@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Forge labs</title>
+<link rel="stylesheet" href="assets/lab.css">
+</head>
+<body data-lab="dashboard">
+<main>
+<h1>Forge labs</h1>
+<p class="lede">A multi-tenant inference platform across two simulated data centers, built one phase at a time. Progress and quiz scores live in this browser only.</p>
+<div id="labs"></div>
+<footer>
+<p>Forge · <a href="https://github.com/jimmie-potts/kubernetes-practice">repo</a> · <a href="https://github.com/jimmie-potts/kubernetes-practice/issues">tickets</a> · Live check buttons inside labs need the repo served locally: <code>python3 -m http.server</code> from the repo root, then <code>http://localhost:8000/docs/labs/</code>.</p>
+</footer>
+</main>
+<script>
+(function () {
+  'use strict';
+  var labs = [
+    { id: 'phase-0', title: 'Phase 0: Boot the data centers', href: 'phase-0-boot-the-data-centers.html', ticket: 2 },
+    { id: 'phase-1', title: 'Phase 1: First Service by hand', href: 'phase-1-first-service-by-hand.html', ticket: 3 },
+    { id: 'phase-2', title: 'Phase 2: Config, health, and scaling', href: 'phase-2-config-health-scaling.html', ticket: 4 },
+    { id: 'phase-3', title: 'Phase 3: Tenant isolation', ticket: 5 },
+    { id: 'phase-4', title: 'Phase 4: Second data center and failover', ticket: 6 },
+    { id: 'phase-5', title: 'Phase 5: Package Services with Helm', ticket: 7 },
+    { id: 'phase-6', title: 'Phase 6: Telemetry', ticket: 8 },
+    { id: 'phase-7', title: 'Phase 7: The Forge Console', ticket: 9 },
+    { id: 'phase-8', title: 'Phase 8 (stretch): Tenant CRD and Go operator', ticket: 10 },
+    { id: 'phase-9', title: 'Phase 9 (stretch): GitOps with Argo CD', ticket: 11 },
+  ];
+  function read(id, k) {
+    try { return JSON.parse(localStorage.getItem('forge-labs/' + id + '/' + k)); }
+    catch (e) { return null; }
+  }
+  var root = document.getElementById('labs');
+  labs.forEach(function (lab) {
+    var card = document.createElement('div');
+    card.className = 'lab-card' + (lab.href ? '' : ' pending');
+    var left = document.createElement('div');
+    var name = lab.href
+      ? '<a href="' + lab.href + '">' + lab.title + '</a>'
+      : lab.title;
+    left.innerHTML = name + ' <span class="meta">(<a href="https://github.com/jimmie-potts/kubernetes-practice/issues/' + lab.ticket + '">#' + lab.ticket + '</a>)</span>';
+    var right = document.createElement('div');
+    right.className = 'meta';
+    if (!lab.href) {
+      right.textContent = 'lab lands when the ticket starts';
+    } else {
+      var p = read(lab.id, 'progress');
+      var q = read(lab.id, 'quiz');
+      var pct = p && p.total ? Math.round(100 * p.done / p.total) : 0;
+      right.innerHTML = (p ? p.done + '/' + p.total + ' steps' : 'not started')
+        + (q && q.answered ? ' · quiz ' + q.right + '/' + q.total : '')
+        + ' <span class="bar"><i style="width:' + pct + '%"></i></span>';
+    }
+    card.appendChild(left); card.appendChild(right);
+    root.appendChild(card);
+  });
+})();
+</script>
+</body>
+</html>

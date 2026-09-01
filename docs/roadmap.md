@@ -15,4 +15,4 @@ The build is ten tracer-bullet tickets, one per phase. Each phase ends with some
 | 8. Tenant CRD and Go operator (stretch) | [#10](https://github.com/jimmie-potts/kubernetes-practice/issues/10) | `kubectl apply` onboards a Tenant |
 | 9. GitOps with Argo CD (stretch) | [#11](https://github.com/jimmie-potts/kubernetes-practice/issues/11) | Clusters pull the Registry; drift reverts |
 
-Start with [#2](https://github.com/jimmie-potts/kubernetes-practice/issues/2) and its lab, `docs/labs/phase-0-boot-the-data-centers.md`. Lab docs for later phases land when their ticket starts.
+Labs are interactive HTML under `docs/labs/` (ADR-0008): open the [dashboard](https://jimmie-potts.github.io/kubernetes-practice/labs/) or serve locally with `python3 -m http.server`. Lab pages for later phases land when their ticket starts.

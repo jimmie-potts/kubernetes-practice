@@ -9,12 +9,13 @@ import os
 import time
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from pydantic import BaseModel
 
 MODEL_NAME = os.environ.get("MODEL_NAME", "forge-tiny")
-VERSION = os.environ.get("VERSION", "0.1.1")
+VERSION = os.environ.get("VERSION", "0.1.2")
 # Seconds before the "model" is loaded and the server reports ready.
 MODEL_LOAD_SECONDS = int(os.environ.get("MODEL_LOAD_SECONDS", "10"))
 # Simulated inference latency per request (does not burn CPU).
@@ -30,6 +31,9 @@ STARTED_AT = time.monotonic()
 FROZEN = False
 
 app = FastAPI(title="fake-inference")
+# Wide-open CORS so the lab pages' "check my work" buttons can probe the
+# endpoints from a browser. Fine for a lab stand-in, never for a real API.
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 REQUESTS = Counter("inference_requests_total", "Completions served", ["model"])
 LATENCY = Histogram("inference_latency_seconds", "Time to serve a completion", ["model"])
