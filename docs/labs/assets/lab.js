@@ -69,7 +69,7 @@
       }, function () {
         // CORS-blocked and network-down both land here; a no-cors probe tells them apart.
         fetch(url, { mode: 'no-cors', cache: 'no-store' }).then(function () {
-          out.textContent = 'reachable, but CORS-blocked: load image 0.1.2+ to enable full checks';
+          out.textContent = 'reachable, but CORS-blocked: rebuild and load the current fake-inference image to enable checks';
           out.classList.add('warn');
         }, function () {
           out.textContent = 'unreachable: is the service running?';

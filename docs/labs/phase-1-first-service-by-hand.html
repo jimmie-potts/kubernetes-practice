@@ -50,7 +50,7 @@
 <p>In ECS terms, you asked for a task whose image was never pushed to ECR.</p>
 </details>
 <p>Forge has no registry, so kind offers a shortcut that copies an image onto every node:</p>
-<pre><code>docker build -t forge/fake-inference:0.1.0 services/fake-inference/</code></pre>
+<pre><code>docker build -t forge/fake-inference:0.1.0 --build-arg APP_VERSION=0.1.0 services/fake-inference/</code></pre>
 <pre><code>kind load docker-image forge/fake-inference:0.1.0 --name dc-east</code></pre>
 <p>Now watch, touching nothing else:</p>
 <pre><code>kubectl --context kind-dc-east get pods -w</code></pre>

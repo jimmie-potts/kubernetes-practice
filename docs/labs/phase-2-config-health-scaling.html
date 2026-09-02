@@ -65,8 +65,8 @@ stringData:
 <li><strong>Readiness</strong>: "may I receive traffic?" Fails → pod is removed from the Service's rotation. Nothing is killed. This is the routing half of your ALB target group health check, with one difference that matters: ECS also stops and replaces a task that fails its ALB check. Kubernetes separates "stop routing to it" (readiness) from "restart it" (liveness), while ECS fuses them into one blunt verdict. Readiness-without-killing has no ECS twin, and it is the property that made the zero-downtime rollout below possible.</li>
 <li><strong>Liveness</strong>: "am I beyond saving?" Fails repeatedly → kubelet restarts the container. This is the ECS container health check that replaces a task.</li>
 </ul>
-<p>Version 0.1.1 of fake-inference ships a way to prove the difference (a <code>/admin/freeze</code> endpoint that simulates a hung server). Load it into the data center:</p>
-<pre><code>docker build -t forge/fake-inference:0.1.1 services/fake-inference/</code></pre>
+<p>fake-inference has a way to prove the difference: an <code>/admin/freeze</code> endpoint that simulates a hung server. Tag a new build, 0.1.1, and load it into the data center (the version bump is itself the point: you are about to roll it out with probes watching):</p>
+<pre><code>docker build -t forge/fake-inference:0.1.1 --build-arg APP_VERSION=0.1.1 services/fake-inference/</code></pre>
 <pre><code>kind load docker-image forge/fake-inference:0.1.1 --name dc-east</code></pre>
 <p>Edit <code>chat-deployment.yaml</code>: change the image tag to <code>0.1.1</code>, and add probes to the container (same indent level as <code>envFrom</code>):</p>
 <pre><code>          readinessProbe:
