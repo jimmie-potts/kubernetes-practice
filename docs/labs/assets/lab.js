@@ -16,17 +16,32 @@
   }
   steps.forEach(function (s) {
     var id = s.dataset.step;
-    var box = document.createElement('input');
-    box.type = 'checkbox'; box.className = 'step-done'; box.title = 'Mark step done';
-    box.checked = load(id) === '1';
-    s.classList.toggle('done', box.checked);
-    box.addEventListener('change', function () {
-      store(id, box.checked ? '1' : '0');
-      s.classList.toggle('done', box.checked);
-      updateProgress();
+    var done = load(id) === '1';
+    // Two synced checkboxes per step: one in the heading, one at the bottom so a
+    // long step can be ticked off without scrolling back up.
+    var top = document.createElement('input');
+    top.type = 'checkbox'; top.className = 'step-done'; top.title = 'Mark step done';
+    var foot = document.createElement('label');
+    foot.className = 'step-foot';
+    var bottom = document.createElement('input');
+    bottom.type = 'checkbox'; bottom.className = 'step-done';
+    foot.appendChild(bottom);
+    foot.appendChild(document.createTextNode(' Mark this step done'));
+    function set(v) {
+      top.checked = bottom.checked = v;
+      s.classList.toggle('done', v);
+    }
+    set(done);
+    [top, bottom].forEach(function (box) {
+      box.addEventListener('change', function () {
+        set(box.checked);
+        store(id, box.checked ? '1' : '0');
+        updateProgress();
+      });
     });
     var h = s.querySelector('h2');
-    if (h) h.insertBefore(box, h.firstChild);
+    if (h) h.insertBefore(top, h.firstChild);
+    s.appendChild(foot);
   });
   updateProgress();
 
