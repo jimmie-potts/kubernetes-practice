@@ -12,7 +12,7 @@
 <p class="lede">A multi-tenant inference platform across two simulated data centers, built one phase at a time. Progress and quiz scores live in this browser only.</p>
 <div id="labs"></div>
 <footer>
-<p><button class="check" id="reset-progress" type="button">Reset all lab progress</button> (clears step checkboxes and quiz scores in this browser)</p>
+<p><button class="check" id="reset-progress" type="button">Reset all lab progress</button> (clears step checkboxes, quiz scores, and teach-back answers in this browser)</p>
 <p>Forge · <a href="https://github.com/jimmie-potts/kubernetes-practice">repo</a> · <a href="https://github.com/jimmie-potts/kubernetes-practice/issues">tickets</a> · Live check buttons inside labs need the repo served locally: <code>python3 -m http.server</code> from the repo root, then <code>http://localhost:8000/docs/labs/</code>.</p>
 </footer>
 </main>
@@ -51,9 +51,11 @@
     } else {
       var p = read(lab.id, 'progress');
       var q = read(lab.id, 'quiz');
+      var t = read(lab.id, 'teach');
       var pct = p && p.total ? Math.round(100 * p.done / p.total) : 0;
       right.innerHTML = (p ? p.done + '/' + p.total + ' steps' : 'not started')
         + (q && q.answered ? ' · quiz ' + q.right + '/' + q.total : '')
+        + (t && t.written ? ' · taught back ' + t.written + '/' + t.total : '')
         + ' <span class="bar"><i style="width:' + pct + '%"></i></span>';
     }
     card.appendChild(left); card.appendChild(right);
@@ -61,7 +63,7 @@
   });
   var reset = document.getElementById('reset-progress');
   if (reset) reset.addEventListener('click', function () {
-    if (!confirm('Clear all step progress and quiz scores stored in this browser?')) return;
+    if (!confirm('Clear all step progress, quiz scores, and teach-back answers stored in this browser?')) return;
     var doomed = [];
     for (var i = 0; i < localStorage.length; i++) {
       var k = localStorage.key(i);

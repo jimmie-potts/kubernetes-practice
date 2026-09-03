@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Phase 2: Config, health, and scaling — Forge labs</title>
+<title>Phase 2: Config, health, and scaling · Forge labs</title>
 <link rel="stylesheet" href="assets/lab.css">
 </head>
 <body data-lab="phase-2">
@@ -11,10 +11,16 @@
 <nav class="crumbs"><a href="index.html">← All labs</a></nav>
 <h1>Phase 2: Config, health, and scaling</h1>
 <p class="lede">chat stops being a demo and starts behaving like a production service. Ticket <a href="https://github.com/jimmie-potts/kubernetes-practice/issues/4">#4</a>.</p>
-<div class="chips"><span class="chip" id="progress"></span><span class="chip" id="quiz-score"></span></div>
+<div class="chips"><span class="chip" id="progress"></span><span class="chip" id="quiz-score"></span><span class="chip" id="teach-score"></span></div>
 
 <p>Goal: configuration moves out of the pod spec, probes teach Kubernetes what "healthy" and "ready" mean for a model server, resources make scheduling and autoscaling possible, an HPA scales chat under load, and a bad rollout gets rolled back.</p>
-<p>Prerequisite: phase 1's end state in dc-east (chat Deployment, Service, Ingress, ingress-nginx answering on 8080).</p>
+<section class="step" data-step="s0">
+<h2>Before you start</h2>
+<p>Prerequisite: phase 1's end state in dc-east (chat Deployment, Service, Ingress, ingress-nginx answering on 8080). Confirm it:</p>
+<pre><code>kubectl --context kind-dc-east get deploy,svc,ingress -l tenant=acme</code></pre>
+<p>Start the command journal in this terminal. It writes to the gitignored <code>.journal/phase-2.log</code> and records only this terminal:</p>
+<pre><code>source scripts/lab-journal.sh start phase-2</code></pre>
+</section>
 
 <section class="step" data-step="s1">
 <h2>Step 1: Configuration out of the pod spec</h2>
@@ -51,11 +57,18 @@ stringData:
                 name: chat-api-key</code></pre>
 <p>Apply all three files:</p>
 <pre><code>kubectl --context kind-dc-east apply -f deploy/tenants/acme/</code></pre>
-<p>The pod template changed, so the Deployment rolls the pods. Verify the environment actually landed inside a container:</p>
+<p>The pod template changed, so the Deployment rolls the pods. Wait for the roll to finish, or <code>exec</code> can land in an old pod:</p>
+<pre><code>kubectl --context kind-dc-east rollout status deployment/chat</code></pre>
+<p>Verify the environment actually landed inside a container:</p>
+<p class="predict">ACME_API_KEY came from a Secret and MODEL_NAME from a ConfigMap. Will the process inside the container see any difference between them?</p>
 <pre><code>kubectl --context kind-dc-east exec deploy/chat -- env | grep -E 'MODEL_NAME|ACME_API_KEY|BURN'</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Three plain <code>NAME=value</code> lines. The process cannot tell which one came from the Secret.</p>
+</details>
 <details class="aside"><summary>Why editing a ConfigMap does not restart pods</summary>
 <p>One gotcha to file away: editing a ConfigMap alone does NOT restart pods. Env vars are read at process start, so pods keep running with old values until something rolls them (<code>kubectl rollout restart deployment chat</code>). Platforms get bitten by this constantly.</p>
 </details>
+<p class="sources">Docs: <a href="https://kubernetes.io/docs/concepts/configuration/configmap/">ConfigMaps</a> · <a href="https://kubernetes.io/docs/concepts/configuration/secret/">Secrets</a></p>
 </section>
 
 <section class="step" data-step="s2">
@@ -84,12 +97,13 @@ stringData:
             failureThreshold: 3</code></pre>
 <p>Apply, and rerun phase 1's crack-finder while the pods roll:</p>
 <pre><code>kubectl --context kind-dc-east apply -f deploy/tenants/acme/chat-deployment.yaml</code></pre>
+<p class="predict">Same ten-second model load as phase 1's step 6. How many 503s this time?</p>
 <pre><code>for i in $(seq 1 20); do curl -s -o /dev/null -w '%{http_code} ' -X POST http://chat.acme.dc-east.localtest.me:8080/v1/completions -H 'Content-Type: application/json' -d '{"prompt":"hi"}'; sleep 1; done; echo</code></pre>
 <details class="expected"><summary>Expected output</summary>
-<p>All 200s.</p>
+<p>All 200s. If one or two 503s lead the list, step 1's old pods were still loading their model when you applied; they had no probe yet, and the probes govern only the new pods.</p>
 </details>
 <p>Same ten-second model load as phase 1, but new pods now join the Service only after <code>/readyz</code> succeeds, and the rolling update keeps old pods serving until replacements are truly ready. Zero-downtime deploys are not a product feature; they are this probe.</p>
-<p><button class="check" data-url="http://chat.acme.dc-east.localtest.me:8080/healthz">Check: chat /healthz</button></p>
+<p><button class="check" data-url="http://chat.acme.dc-east.localtest.me:8080/readyz">Check: chat /readyz</button></p>
 <details class="aside"><summary>What about models that load for minutes?</summary>
 <p>Real model servers load weights for minutes, not seconds. The production tool for that is a third probe, <code>startupProbe</code>, which suspends the other two until first success; one to know exists, not needed here.</p>
 </details>
@@ -98,7 +112,7 @@ stringData:
 <p>Terminal 1:</p>
 <pre><code>POD=$(kubectl --context kind-dc-east get pods -l app=chat -o name | head -1); kubectl --context kind-dc-east port-forward $POD 18080:8000 &amp; sleep 2; curl -s -X POST localhost:18080/admin/freeze; kill %1</code></pre>
 <details class="expected"><summary>Expected output</summary>
-<p>Watch terminal 2 tell the story in two acts: within a few seconds the frozen pod drops to <code>READY 0/1</code> (readiness failed, traffic drained away, nothing killed), and around fifteen seconds later <code>RESTARTS</code> ticks to 1 (liveness gave up, kubelet restarted the container). The restart wipes the in-memory freeze, the model reloads, readiness passes, and the pod rejoins on its own.</p>
+<p>Watch terminal 2 tell the story in two acts: within a few seconds the frozen pod drops to <code>READY 0/1</code> (readiness failed, traffic drained away, nothing killed), and about ten seconds after that, fifteen from the freeze, <code>RESTARTS</code> ticks to 1 (liveness gave up, kubelet restarted the container). The restart wipes the in-memory freeze, the model reloads, readiness passes, and the pod rejoins on its own.</p>
 </details>
 <p>Ctrl-C the watch.</p>
 <figure class="diagram">
@@ -125,6 +139,7 @@ stringData:
 <details class="aside"><summary>Why keep liveness conservative</summary>
 <p>One production caution: keep liveness thresholds conservative. An aggressive liveness probe plus a slow dependency equals restart storms; readiness should do the fast reacting, liveness only the last resort.</p>
 </details>
+<p class="sources">Docs: <a href="https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/">Liveness, readiness, and startup probes</a> · <a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/">Configuring probes</a></p>
 </section>
 
 <section class="step" data-step="s3">
@@ -139,6 +154,7 @@ stringData:
               memory: 256Mi</code></pre>
 <pre><code>kubectl --context kind-dc-east apply -f deploy/tenants/acme/chat-deployment.yaml</code></pre>
 <p>Two numbers, two meanings. <strong>Requests</strong> are what the scheduler <em>reserves</em>: the pod lands only on a node with 100 millicores and 128Mi unclaimed (the ECS task size used for placement). <strong>Limits</strong> are what the runtime <em>enforces</em>: CPU beyond 500m gets throttled, memory beyond 256Mi gets the container OOM-killed. Everything ahead is denominated in requests: HPA percentages (step 5) measure against them, and tenant Quotas (phase 3) add them up.</p>
+<p class="sources">Docs: <a href="https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/">Resource requests and limits</a></p>
 </section>
 
 <section class="step" data-step="s4">
@@ -153,6 +169,7 @@ stringData:
 <p>Give it thirty seconds to take its first scrape, then look at your data center's vitals:</p>
 <pre><code>kubectl --context kind-dc-east top nodes</code></pre>
 <pre><code>kubectl --context kind-dc-east top pods</code></pre>
+<p class="sources">Docs: <a href="https://kubernetes.io/docs/tasks/debug/debug-cluster/resource-metrics-pipeline/">Resource metrics pipeline</a></p>
 </section>
 
 <section class="step" data-step="s5">
@@ -205,44 +222,58 @@ spec:
 <p>Terminal 2 (leave it running through the whole step; <code>&lt;unknown&gt;</code> in TARGETS just means the first metrics scrape hasn't landed yet):</p>
 <pre><code>kubectl --context kind-dc-east get hpa chat -w</code></pre>
 <p>Terminal 1, open the floodgates. 2000 requests, 12 at a time, each burning 200ms of CPU on arrival:</p>
+<p class="predict">Each request burns 200ms of CPU and the target is 50% of a 100m request. Will REPLICAS climb one at a time, or jump?</p>
 <pre><code>seq 1 2000 | xargs -P 12 -I{} curl -s -o /dev/null -w '%{http_code}\n' -X POST http://chat.acme.dc-east.localtest.me:8080/v1/completions -H 'Content-Type: application/json' -d '{"prompt":"load test"}' | sort | uniq -c</code></pre>
 <details class="expected"><summary>Expected output</summary>
 <p>Watch terminal 2: CPU blows through the 50% target (throttling pins each pod near its 500m limit, which is 500% of requests), and REPLICAS jumps upward, often straight from 2 to 6 in a single decision, typically inside a minute. When the load finishes, read the histogram: expect all or nearly all 200s; the validation run scored 1997 to 3.</p>
 </details>
 <p>Readiness keeps unready pods out of rotation (step 2 already proved a roll with zero errors), but under deliberate overload a stray 502 or two out of 2000 can still slip through at the instant several throttle-starved pods join at once. Production edges close that last 0.1% with retries at the load balancer or client, a knob we revisit with the Global Entry Point in phase 4. Then, roughly a minute after the load stops, watch the HPA walk the replicas back down to 2. Ctrl-C when it settles.</p>
+<p class="sources">Docs: <a href="https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/">Horizontal Pod Autoscaling</a></p>
 </section>
 
-<section class="step" data-step="s6">
-<h2>Step 6: The bad rollout, and the undo</h2>
-<p>Ship a broken model version (a tag that does not exist):</p>
+<section class="step solo" data-step="s6">
+<h2>On your own: the bad rollout, and the undo</h2>
+<p>Goal: ship a broken image tag, prove that Acme's traffic never notices, undo the rollout, then re-assert your file as the truth. You have seen every command you need except <code>kubectl set image</code>, whose shape is <code>set image deployment/NAME CONTAINER=IMAGE</code>. The broken tag is <code>forge/fake-inference:0.2.0-broken</code>, which exists nowhere.</p>
+<p>Four things to show, in order:</p>
+<ol>
+<li>The rollout is stuck: <code>rollout status</code> times out.</li>
+<li>One new pod sits in <code>ErrImagePull</code> or <code>ImagePullBackOff</code>, the two alternate, while the old pods stay <code>Running 1/1</code>.</li>
+<li>A completions request mid-failure still returns 200.</li>
+<li>After the undo, the Deployment runs 0.1.1 again and the rollout completes.</li>
+</ol>
+<p>Prove the end state:</p>
+<pre><code>kubectl --context kind-dc-east get deploy chat -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}' &amp;&amp; kubectl --context kind-dc-east rollout status deployment/chat --timeout=60s</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p><code>forge/fake-inference:0.1.1</code>, then "successfully rolled out".</p>
+</details>
+<p>That much was already true before this step. The trace that proves the failed rollout happened is the ReplicaSet it left behind:</p>
+<pre><code>kubectl --context kind-dc-east get rs -l app=chat -o custom-columns=NAME:.metadata.name,DESIRED:.spec.replicas,IMAGE:.spec.template.spec.containers[0].image</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Among the ReplicaSets: one at <code>DESIRED 0</code> still carrying <code>0.2.0-broken</code>, and the live one at <code>DESIRED 2</code> on <code>0.1.1</code>. Kubernetes keeps the last ten ReplicaSets, so look now rather than after more rollouts.</p>
+</details>
+<p><button class="check" data-url="http://chat.acme.dc-east.localtest.me:8080/readyz">Check: chat /readyz after the undo</button></p>
+<details class="hint"><summary>Show the commands</summary>
 <pre><code>kubectl --context kind-dc-east set image deployment/chat fake-inference=forge/fake-inference:0.2.0-broken</code></pre>
 <pre><code>kubectl --context kind-dc-east rollout status deployment/chat --timeout=30s</code></pre>
-<details class="expected"><summary>Expected output</summary>
-<p>It times out: the rollout is stuck.</p>
-</details>
-<p>Look at why, and at what did NOT happen:</p>
+<p class="predict">How many chat pods will this list, and which two fields of the rolling update strategy decide that number?</p>
 <pre><code>kubectl --context kind-dc-east get pods -l app=chat</code></pre>
 <details class="expected"><summary>Expected output</summary>
-<p>One new pod in <code>ImagePullBackOff</code>, the old pods still <code>Running 1/1</code>.</p>
+<p>Three: two old pods <code>Running 1/1</code> and one new pod in <code>ErrImagePull</code> or <code>ImagePullBackOff</code>. <code>maxSurge</code> of 25% on two replicas rounds up to one extra pod; <code>maxUnavailable</code> of 25% rounds down to zero, so no old pod is removed.</p>
 </details>
-<p>The rolling update strategy creates before it destroys, and it will not touch a healthy old pod until a replacement passes readiness. So Acme's view, right now, mid-failed-deploy:</p>
 <pre><code>curl -s -o /dev/null -w '%{http_code}\n' -X POST http://chat.acme.dc-east.localtest.me:8080/v1/completions -H 'Content-Type: application/json' -d '{"prompt":"still up?"}'</code></pre>
-<details class="expected"><summary>Expected output</summary>
-<pre><code>200</code></pre>
-</details>
-<p>A botched deploy degraded into a non-event. ECS's deployment circuit breaker gives you this with <code>rollback: true</code>; here you are the circuit breaker:</p>
 <pre><code>kubectl --context kind-dc-east rollout undo deployment/chat</code></pre>
 <pre><code>kubectl --context kind-dc-east rollout status deployment/chat --timeout=60s</code></pre>
-<p><button class="check" data-url="http://chat.acme.dc-east.localtest.me:8080/healthz">Check: chat /healthz after the undo</button></p>
-<details class="aside"><summary>Reading rollout history</summary>
-<p><code>kubectl rollout history deployment/chat</code> shows the revision trail (the undo prints a warning about a last-applied annotation, and the rolled-back revision gets renumbered to the newest; both are normal, and the re-apply below squares everything).</p>
-</details>
-<p>Last thing: <code>set image</code> was an imperative side-door, and your YAML file is supposed to be the truth. Re-assert it:</p>
 <pre><code>kubectl --context kind-dc-east apply -f deploy/tenants/acme/chat-deployment.yaml</code></pre>
-<p>No-op if they already agree, correction if they drifted. Sit with that idea for a second: a file in git as desired state, continuously re-asserted. That is the whole pitch of GitOps, and of phase 9.</p>
+</details>
+<p>Why it worked: the rolling update strategy creates before it destroys, and it will not touch a healthy old pod until a replacement passes readiness. A botched deploy degraded into a non-event. ECS's deployment circuit breaker gives you this with <code>rollback: true</code>; here you are the circuit breaker.</p>
+<details class="aside"><summary>Reading rollout history</summary>
+<p><code>kubectl rollout history deployment/chat</code> shows the revision trail (the undo prints a warning about a last-applied annotation, and the rolled-back revision gets renumbered to the newest; both are normal, and the final apply squares everything).</p>
+</details>
+<p>Last thing: <code>set image</code> was an imperative side-door, and your YAML file is supposed to be the truth. The final apply re-asserts it: no-op if they already agree, correction if they drifted. Sit with that idea for a second: a file in git as desired state, continuously re-asserted. That is the whole pitch of GitOps, and of phase 9.</p>
 <details class="aside"><summary>The spec.replicas asterisk</summary>
 <p>One honest asterisk: <code>spec.replicas</code>. Once the HPA owns the replica count, a re-apply mid-scale snaps replicas back to the file's 2 and the HPA fights its way back up. Standard practice is to drop <code>spec.replicas</code> from the file once an HPA manages it; we keep it today (it equals the HPA floor, so the apply was a no-op) and fix it properly when the Helm chart takes over in phase 5.</p>
 </details>
+<p class="sources">Docs: <a href="https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#rolling-back-a-deployment">Rolling back a Deployment</a> · <a href="https://kubernetes.io/docs/reference/kubectl/generated/kubectl_set/kubectl_set_image/">kubectl set image</a></p>
 </section>
 
 <section class="step" data-step="s7">
@@ -252,7 +283,42 @@ spec:
 <p>Deployment 2/2 on image 0.1.1, HPA showing a live CPU percentage against a 50% target, <code>MODEL_NAME=acme-chat-1</code> from the ConfigMap, and <code>top</code> returning numbers.</p>
 </details>
 <p>Plus, demonstrated along the way: the freeze restart, the all-200 load test, and the rollback.</p>
-<p><button class="check" data-url="http://chat.acme.dc-east.localtest.me:8080/healthz">Check: chat /healthz</button></p>
+<p><button class="check" data-url="http://chat.acme.dc-east.localtest.me:8080/readyz">Check: chat /readyz</button></p>
+</section>
+
+<section class="step drill" data-step="d1">
+<h2>Drill: a deploy that lies</h2>
+<p>This drill injects one of three faults into chat, at random. Two of them stall a rollout while Acme's traffic stays healthy, which is how real incidents hide. One slows every request without breaking anything. Find it, fix it, confirm with the check.</p>
+<pre><code>scripts/drills/phase-2.sh break</code></pre>
+<p>Give it a minute. Then ask two questions, in this order, and state the answers before opening any hint: is Acme's traffic healthy, and has the Deployment converged?</p>
+<pre><code>curl -s -o /dev/null -w '%{http_code} %{time_total}s\n' -X POST http://chat.acme.dc-east.localtest.me:8080/v1/completions -H 'Content-Type: application/json' -d '{"prompt":"drill"}'</code></pre>
+<pre><code>kubectl --context kind-dc-east rollout status deployment/chat --timeout=10s</code></pre>
+<details class="hint"><summary>Hint 1: where to look</summary>
+<p>A healthy 200 does not mean the Deployment is healthy. If <code>rollout status</code> times out, list the pods: the STATUS and READY columns of the newest pod name the layer. <code>Pending</code> means the scheduler found no node for it. <code>Running</code> with <code>READY 0/1</code> means the container started but a probe keeps failing. If every pod is fine and only the latency is wrong, the pods are faithfully running the configuration they were given, so check what that configuration is.</p>
+</details>
+<details class="hint"><summary>Hint 2: what to run</summary>
+<pre><code>kubectl --context kind-dc-east get pods -l app=chat</code></pre>
+<pre><code>kubectl --context kind-dc-east describe pod POD | grep -A12 Events</code></pre>
+<pre><code>kubectl --context kind-dc-east get deploy chat -o yaml | grep -A6 -E '^ +(readinessProbe|requests):'</code></pre>
+<pre><code>kubectl --context kind-dc-east get configmap chat-config -o yaml</code></pre>
+<pre><code>kubectl --context kind-dc-east exec deploy/chat -- env | grep -E 'DELAY|MODEL'</code></pre>
+<p>Replace <code>POD</code> with the newest pod's name. Events say why a pod is Pending ("Insufficient cpu") or not Ready ("Readiness probe failed"). Compare the live objects with your files in <code>deploy/tenants/acme/</code>: something in one of them no longer matches. In <code>-o yaml</code> output, the <code>last-applied-configuration</code> annotation near the top holds what your file said the last time you applied it, and the live values sit below. Where the two disagree, you are looking at the drift.</p>
+</details>
+<details class="hint"><summary>Hint 3: the fix, by symptom</summary>
+<table>
+<thead><tr><th>Symptom</th><th>What drifted</th><th>Fix</th></tr></thead>
+<tbody>
+<tr><td>New pod <code>Running 0/1</code>; events say the readiness probe got a 404</td><td>The probe path in the Deployment</td><td rowspan="2">Your files are the truth: <code>kubectl --context kind-dc-east apply -f deploy/tenants/acme/</code></td></tr>
+<tr><td>New pod <code>Pending</code>; events say no node has enough CPU</td><td>The CPU request in the Deployment</td></tr>
+<tr><td>Every pod healthy, every request slow; <code>env</code> shows a large <code>SIMULATED_DELAY_MS</code></td><td>A value in the ConfigMap</td><td>Apply the files as above, then remember step 1's gotcha: a changed ConfigMap reaches no pod until they roll. <code>kubectl --context kind-dc-east rollout restart deployment chat</code></td></tr>
+</tbody>
+</table>
+<p>Ignore <code>secret/chat-api-key configured</code> in the apply output. A Secret written through <code>stringData</code> reports a change on every apply, drift or not.</p>
+</details>
+<p>When you think it is fixed:</p>
+<pre><code>scripts/drills/phase-2.sh check</code></pre>
+<p>Stuck? <code>scripts/drills/phase-2.sh undo</code> names the fault and repairs it. Run <code>break</code> again another day; the fault is picked at random each time.</p>
+<p class="sources">Docs: <a href="https://kubernetes.io/docs/tasks/debug/debug-application/debug-pods/">Debugging pods</a> · <a href="https://kubernetes.io/docs/tasks/debug/debug-application/debug-running-pod/">Debugging running pods</a></p>
 </section>
 
 <section>
@@ -363,7 +429,7 @@ spec:
 <label class="option"><input type="radio" name="q3"> Of the node's total CPU capacity</label>
 <label class="option" data-correct="true"><input type="radio" name="q3"> Of the CPU request, 100m, so about 50m per pod</label>
 <label class="option"><input type="radio" name="q3"> Of the sum of all pods' usage across the Deployment</label>
-<div class="explain" hidden>HPA utilization percentages are measured against <em>requests</em>, not limits — which is why the lab could show pods at 500% of requests (ten times the 50% target) while throttled at their limit, and why requests are the unit everything else prices in.</div>
+<div class="explain" hidden>HPA utilization percentages are measured against <em>requests</em>, not limits. That is why the lab could show pods at 500% of requests (ten times the 50% target) while throttled at their limit, and why requests are the unit everything else prices in.</div>
 </div>
 <div class="q">
 <p class="question">4. During the 0.2.0-broken rollout, Acme's requests kept returning 200. What protected them?</p>
@@ -371,7 +437,7 @@ spec:
 <label class="option"><input type="radio" name="q4"> The HPA scaled up extra healthy replicas to absorb the failure</label>
 <label class="option"><input type="radio" name="q4"> Kubernetes automatically rolled back when the image pull failed</label>
 <label class="option" data-correct="true"><input type="radio" name="q4"> The rolling update would not remove healthy old pods until a replacement passed readiness, and the new pod never did</label>
-<div class="explain" hidden>The strategy creates before it destroys: the new pod sat in <code>ImagePullBackOff</code> and never became ready, so the old pods were never touched. Nothing rolled back automatically — you were the circuit breaker, via <code>rollout undo</code>.</div>
+<div class="explain" hidden>The strategy creates before it destroys: the new pod sat in <code>ImagePullBackOff</code> and never became ready, so the old pods were never touched. Nothing rolled back automatically. You were the circuit breaker, via <code>rollout undo</code>.</div>
 </div>
 <div class="q">
 <p class="question">5. Why does the lab tell you to keep liveness thresholds conservative and let readiness do the fast reacting?</p>
@@ -379,7 +445,7 @@ spec:
 <label class="option" data-correct="true"><input type="radio" name="q5"> An aggressive liveness probe plus a slow dependency can restart healthy-enough pods in a storm, while readiness only drains traffic harmlessly</label>
 <label class="option"><input type="radio" name="q5"> Liveness failures block rolling updates from making progress</label>
 <label class="option"><input type="radio" name="q5"> Readiness probes run before liveness probes, so tight liveness timing is redundant</label>
-<div class="explain" hidden>Readiness failing costs nothing but routing; liveness failing kills containers. If a slow dependency makes probes lag, a trigger-happy liveness probe turns a slowdown into restart storms — so restarts should be the last resort.</div>
+<div class="explain" hidden>Readiness failing costs nothing but routing; liveness failing kills containers. If a slow dependency makes probes lag, a trigger-happy liveness probe turns a slowdown into restart storms, so restarts should be the last resort.</div>
 </div>
 <div class="q">
 <p class="question">6. After <code>rollout undo</code> fixed the bad deploy, why does the lab end the step with <code>kubectl apply -f</code> on the deployment file?</p>
@@ -387,7 +453,26 @@ spec:
 <label class="option"><input type="radio" name="q6"> To force Kubernetes to re-pull the 0.1.1 image</label>
 <label class="option" data-correct="true"><input type="radio" name="q6"> <code>set image</code> was an imperative side-door; re-applying re-asserts the YAML file as the desired state</label>
 <label class="option"><input type="radio" name="q6"> The HPA detaches from a Deployment after a rollback and must be reattached</label>
-<div class="explain" hidden>Imperative commands drift the cluster away from your files. Re-applying makes the file the truth again — a no-op if they agree, a correction if they drifted — which is the core idea behind GitOps.</div>
+<div class="explain" hidden>Imperative commands drift the cluster away from your files. Re-applying makes the file the truth again, a no-op if they agree and a correction if they drifted. That is the core idea behind GitOps.</div>
+</div>
+</section>
+
+<section class="teach-back">
+<h2>Teach it back</h2>
+<p>Write the answer in your own words, as if to a colleague who knows ECS but not Kubernetes. A model answer unlocks after you write a sentence or two. When you report this phase done, copy your answers and paste them in the chat for review.</p>
+<div class="tb" data-tb="t1">
+<p class="prompt">Explain readiness versus liveness to an ECS engineer, and name the one thing ECS fuses that Kubernetes keeps separate.</p>
+<textarea rows="6"></textarea>
+<details class="model"><summary>Compare with a model answer</summary>
+<p>Readiness asks "may this pod receive traffic?", and a failure only removes the pod from the Service's rotation. Liveness asks "is this container beyond saving?", and repeated failures restart it. ECS fuses both into the ALB health check: a task that fails it is pulled from the target group and replaced in one verdict. Kubernetes keeps draining and restarting separate, which is what lets a rollout wait for a model to load without dropping a request.</p>
+</details>
+</div>
+<div class="tb" data-tb="t2">
+<p class="prompt">Interview question: "A deploy is stuck, but users are unaffected. What happened, and what do you do?" Answer in three sentences.</p>
+<textarea rows="5"></textarea>
+<details class="model"><summary>Compare with a model answer</summary>
+<p>The rolling update created a replacement pod that never became ready, so it never removed a healthy old pod, and users kept hitting the old pods. I read the new pod's events to learn why it failed, because Pending, ImagePullBackOff, and a failing probe each point at a different fix. Then I either fix the cause and let the rollout continue, or roll back with rollout undo and re-apply the file so the cluster matches git again.</p>
+</details>
 </div>
 </section>
 

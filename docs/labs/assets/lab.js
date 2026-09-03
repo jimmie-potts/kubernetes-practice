@@ -45,6 +45,19 @@
   });
   updateProgress();
 
+  // Clipboard helper shared by copy buttons and the teach-back export
+  function copyText(text, done) {
+    function fallback() {
+      var ta = document.createElement('textarea');
+      ta.value = text; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); done(); } catch (e) {}
+      ta.remove();
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, fallback);
+    } else { fallback(); }
+  }
+
   // Copy buttons on every code block
   document.querySelectorAll('pre').forEach(function (pre) {
     var btn = document.createElement('button');
@@ -52,16 +65,7 @@
     btn.addEventListener('click', function () {
       var codeEl = pre.querySelector('code');
       var text = (codeEl ? codeEl.innerText : pre.innerText).trim();
-      function flash() { btn.textContent = 'copied'; setTimeout(function () { btn.textContent = 'copy'; }, 1200); }
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(flash, function () { fallback(); });
-      } else { fallback(); }
-      function fallback() {
-        var ta = document.createElement('textarea');
-        ta.value = text; document.body.appendChild(ta); ta.select();
-        try { document.execCommand('copy'); flash(); } catch (e) {}
-        ta.remove();
-      }
+      copyText(text, function () { btn.textContent = 'copied'; setTimeout(function () { btn.textContent = 'copy'; }, 1200); });
     });
     pre.appendChild(btn);
   });
@@ -117,4 +121,85 @@
     });
   });
   updateQuiz();
+
+  // Teach-back: <section class="teach-back"> holding <div class="tb" data-tb="t1">
+  // with p.prompt, a textarea, and details.model. Answers persist per browser;
+  // the model answer unlocks once an answer is written; an export button copies
+  // everything as markdown for review.
+  var MIN_ANSWER = 20;
+  var tbs = Array.prototype.slice.call(document.querySelectorAll('.teach-back .tb'));
+  var teachChip = document.getElementById('teach-score');
+  function answered(t) { var ta = t.querySelector('textarea'); return !!ta && ta.value.trim().length >= MIN_ANSWER; }
+  function updateTeach() {
+    var written = tbs.filter(answered).length;
+    store('teach', JSON.stringify({ written: written, total: tbs.length }));
+    if (teachChip) teachChip.textContent = written + '/' + tbs.length + ' taught back';
+  }
+  if (teachChip && !tbs.length) teachChip.hidden = true;
+  tbs.forEach(function (t) {
+    var id = t.dataset.tb;
+    var ta = t.querySelector('textarea');
+    var model = t.querySelector('details.model');
+    if (!ta) return;
+    ta.value = load('tb/' + id) || '';
+    var saved = document.createElement('div');
+    saved.className = 'saved';
+    ta.parentNode.insertBefore(saved, ta.nextSibling);
+    function refresh() {
+      var ok = answered(t);
+      if (model) { model.classList.toggle('locked', !ok); if (!ok) model.open = false; }
+      saved.textContent = ok ? 'saved in this browser' : (ta.value.trim() ? 'keep going: a sentence or two unlocks the model answer' : '');
+    }
+    var timer;
+    ta.addEventListener('input', function () {
+      clearTimeout(timer);
+      timer = setTimeout(function () { store('tb/' + id, ta.value); refresh(); updateTeach(); }, 250);
+    });
+    if (model) {
+      var summary = model.querySelector('summary');
+      if (summary) summary.addEventListener('click', function (e) {
+        if (model.classList.contains('locked')) {
+          e.preventDefault();
+          saved.textContent = 'write your answer first, then compare';
+        }
+      });
+    }
+    refresh();
+  });
+  var teachSection = document.querySelector('.teach-back');
+  if (teachSection && tbs.length) {
+    var wrap = document.createElement('p');
+    var exportBtn = document.createElement('button');
+    exportBtn.type = 'button'; exportBtn.className = 'action'; exportBtn.textContent = 'Copy answers for review';
+    var note = document.createElement('span');
+    note.className = 'check-result';
+    wrap.appendChild(exportBtn); wrap.appendChild(note); teachSection.appendChild(wrap);
+    exportBtn.addEventListener('click', function () {
+      var h1 = document.querySelector('h1');
+      var prog = JSON.parse(load('progress') || '{}');
+      var quiz = JSON.parse(load('quiz') || '{}');
+      var teach = JSON.parse(load('teach') || '{}');
+      var lines = [
+        '## Teach-back: ' + (h1 ? h1.textContent.trim() : labId),
+        '',
+        'Steps ' + (prog.done || 0) + '/' + (prog.total || 0)
+          + ' · Quiz ' + (quiz.right || 0) + '/' + (quiz.total || 0)
+          + ' · Teach-back ' + (teach.written || 0) + '/' + (teach.total || 0),
+        ''
+      ];
+      tbs.forEach(function (t) {
+        var prompt = t.querySelector('p.prompt');
+        var ta = t.querySelector('textarea');
+        lines.push('### ' + (prompt ? prompt.textContent.trim() : t.dataset.tb));
+        lines.push('');
+        lines.push(ta && ta.value.trim() ? ta.value.trim() : '(no answer yet)');
+        lines.push('');
+      });
+      copyText(lines.join('\n'), function () {
+        note.textContent = 'copied. Paste it in the chat when you report this phase done.';
+        note.className = 'check-result ok';
+      });
+    });
+  }
+  updateTeach();
 })();

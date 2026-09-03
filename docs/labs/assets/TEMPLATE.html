@@ -9,21 +9,56 @@
      output</summary>...</details> right after its command.
   5. Optional depth goes in <details class="aside"><summary>Why ...</summary>.
   6. Live checks: <p><button class="check" data-url="http://...">Check:
-     healthz</button></p>. Result span is injected. Only for plain HTTP GETs.
+     readyz</button></p>. Result span is injected. Only for plain HTTP GETs.
+     Probe /readyz, never /healthz: ingress-nginx answers /healthz itself
+     for any hostname, so it proves nothing about the route.
   7. Diagrams: inline SVG inside <figure class="diagram">, using ONLY the
      classes shown below (box, box-accent, arrow, text, small) so they follow
      the theme. Every diagram has a <figcaption>. No external images.
-  8. Quiz: one <section class="quiz"> before the footer, 5-6 .q blocks,
+  8. Quiz: one <section class="quiz"> after the last step, 5-6 .q blocks,
      exactly one label per q with data-correct="true", each q has a
      div.explain (hidden). First click locks the answer.
   9. Escape HTML entities inside <code> (&lt; &gt; &amp;).
   10. No external requests of any kind: assets are ../-relative, no CDNs.
+  Learning features (ADR-0009):
+  11. Predict prompts: <p class="predict">question</p> directly above a
+     command whose output teaches something. CSS adds the "Predict first:"
+     label, so write only the question. At most one per step. No state: the
+     expected-output block after the command is the reveal.
+  12. On-your-own steps (fading): <section class="step solo" data-step="sN">
+     with an h2 starting "On your own:". The body states the goal and shows
+     the acceptance check; the commands sit in <details class="hint">
+     <summary>Show the commands</summary>. One such step in phases 0-2, two
+     in phases 3-4; from phase 5 on, a step that repeats an earlier concept
+     puts a link to that lab in the hint instead of commands.
+  13. Drill steps: <section class="step drill" data-step="dN"> with an h2
+     starting "Drill:". Body, in order: the break command
+     (scripts/drills/phase-N.sh break), a prompt to state the symptom before
+     opening hints (optionally with the commands that reveal the symptom),
+     three <details class="hint"> blocks titled "Hint 1: where
+     to look", "Hint 2: what to run", "Hint 3: the fix, by symptom", then the
+     check command and the undo command. Hints describe symptoms and never
+     name the injected fault. Drills count as steps.
+  14. Sources: <p class="sources">Docs: <a href="...">Name</a> · ...</p> as
+     the last element of a step, at most three links, official docs only
+     (kubernetes.io, kind.sigs.k8s.io, kubernetes.github.io/ingress-nginx,
+     helm.sh). Validation checks that every link resolves.
+  15. Teach-back: <section class="teach-back"> after the quiz with an h2
+     "Teach it back" and one or two <div class="tb" data-tb="tN"> blocks,
+     each holding <p class="prompt">, an empty <textarea>, and <details
+     class="model"><summary>Compare with a model answer</summary>. Where the
+     ticket has a "Jimmie can explain ..." acceptance criterion, the first
+     prompt is that criterion. lab.js saves answers, locks the model answer
+     until an answer exists, and appends the export button; do not add one.
+  16. The first step of every lab tells the reader to start the command
+     journal: source scripts/lab-journal.sh start phase-N.
+  17. The chips line carries three spans: progress, quiz-score, teach-score.
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Phase N: Title — Forge labs</title>
+<title>Phase N: Title · Forge labs</title>
 <link rel="stylesheet" href="assets/lab.css">
 </head>
 <body data-lab="phase-N">
@@ -31,11 +66,18 @@
 <nav class="crumbs"><a href="index.html">← All labs</a></nav>
 <h1>Phase N: Title</h1>
 <p class="lede">One-sentence goal. Ticket <a href="https://github.com/jimmie-potts/kubernetes-practice/issues/N">#N</a>.</p>
-<div class="chips"><span class="chip" id="progress"></span><span class="chip" id="quiz-score"></span></div>
+<div class="chips"><span class="chip" id="progress"></span><span class="chip" id="quiz-score"></span><span class="chip" id="teach-score"></span></div>
+
+<section class="step" data-step="s0">
+<h2>Before you start</h2>
+<p>Prerequisite check, then the command journal:</p>
+<pre><code>source scripts/lab-journal.sh start phase-N</code></pre>
+</section>
 
 <section class="step" data-step="s1">
 <h2>Step 1: Example step title</h2>
 <p>Explanatory prose. Inline code like <code>kubectl get pods</code> uses code tags.</p>
+<p class="predict">What will the STATUS column show, and why?</p>
 <pre><code>kubectl --context kind-dc-east get nodes</code></pre>
 <details class="expected"><summary>Expected output</summary>
 <pre><code>NAME                    STATUS   ROLES           AGE   VERSION
@@ -44,7 +86,21 @@ dc-east-control-plane   Ready    control-plane   1d    v1.36.1</code></pre>
 <details class="aside"><summary>Why this works</summary>
 <p>Deeper explanation the reader can skip on a first pass.</p>
 </details>
-<p><button class="check" data-url="http://chat.acme.dc-east.localtest.me:8080/healthz">Check: chat /healthz</button></p>
+<p><button class="check" data-url="http://chat.acme.dc-east.localtest.me:8080/readyz">Check: chat /readyz</button></p>
+<p class="sources">Docs: <a href="https://kubernetes.io/docs/concepts/architecture/nodes/">Nodes</a></p>
+</section>
+
+<section class="step solo" data-step="s2">
+<h2>On your own: Example repeated task</h2>
+<p>Goal: what must be true at the end, and which earlier step showed the same moves.</p>
+<p>Prove it:</p>
+<pre><code>kubectl --context kind-dc-west get nodes</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Three nodes, all <code>Ready</code>.</p>
+</details>
+<details class="hint"><summary>Show the commands</summary>
+<pre><code>kind create cluster --config infra/kind/dc-west.yaml</code></pre>
+</details>
 </section>
 
 <figure class="diagram">
@@ -61,6 +117,28 @@ dc-east-control-plane   Ready    control-plane   1d    v1.36.1</code></pre>
 <figcaption>Caption stating what the picture shows.</figcaption>
 </figure>
 
+<section class="step drill" data-step="d1">
+<h2>Drill: Example symptom</h2>
+<p>What the drill breaks, in general terms, and that the fault is random.</p>
+<pre><code>scripts/drills/phase-N.sh break</code></pre>
+<p>Run the checkpoint and state the symptom in one sentence before opening any hint.</p>
+<details class="hint"><summary>Hint 1: where to look</summary>
+<p>Which layers can fail, and how the symptom tells them apart.</p>
+</details>
+<details class="hint"><summary>Hint 2: what to run</summary>
+<pre><code>kubectl --context kind-dc-east get pods</code></pre>
+</details>
+<details class="hint"><summary>Hint 3: the fix, by symptom</summary>
+<table>
+<thead><tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr></thead>
+<tbody><tr><td>...</td><td>...</td><td>...</td></tr></tbody>
+</table>
+</details>
+<p>When you think it is fixed:</p>
+<pre><code>scripts/drills/phase-N.sh check</code></pre>
+<p>Stuck? <code>scripts/drills/phase-N.sh undo</code> names the fault and repairs it.</p>
+</section>
+
 <section class="quiz">
 <h2>Check yourself</h2>
 <div class="q">
@@ -69,6 +147,18 @@ dc-east-control-plane   Ready    control-plane   1d    v1.36.1</code></pre>
 <label class="option" data-correct="true"><input type="radio" name="q1"> Right answer</label>
 <label class="option"><input type="radio" name="q1"> Wrong answer</label>
 <div class="explain" hidden>Why the right answer is right, one or two sentences.</div>
+</div>
+</section>
+
+<section class="teach-back">
+<h2>Teach it back</h2>
+<p>Write the answer in your own words, as if to a colleague who knows ECS but not Kubernetes. A model answer unlocks after you write a sentence or two. When you report this phase done, copy your answers and paste them in the chat for review.</p>
+<div class="tb" data-tb="t1">
+<p class="prompt">The ticket's "can explain" acceptance criterion, as a question.</p>
+<textarea rows="5"></textarea>
+<details class="model"><summary>Compare with a model answer</summary>
+<p>A short model answer in ECS terms.</p>
+</details>
 </div>
 </section>
 
