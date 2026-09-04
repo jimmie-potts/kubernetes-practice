@@ -1,0 +1,705 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phase 3: Tenant isolation · Forge labs</title>
+<link rel="stylesheet" href="assets/lab.css">
+</head>
+<body data-lab="phase-3">
+<main>
+<nav class="crumbs"><a href="index.html">← All labs</a></nav>
+<h1>Phase 3: Tenant isolation</h1>
+<p class="lede">Stark Industries moves in next door to Acme, and the walls go up: namespaces, Quotas, RBAC, and network policy. Ticket <a href="https://github.com/jimmie-potts/kubernetes-practice/issues/5">#5</a>.</p>
+<div class="chips"><span class="chip" id="progress"></span><span class="chip" id="quiz-score"></span><span class="chip" id="teach-score"></span></div>
+
+<section>
+<p>Goal: two Tenants share dc-east without seeing, starving, or reaching each other. Acme's chat moves out of the <code>default</code> namespace into its own. Stark's jarvis arrives, asks for more than its Quota allows, and gets told no. An Acme admin gets a kubeconfig that cannot touch Stark. A default-deny network policy stops chat pods from reaching jarvis while ingress-nginx still can.</p>
+<p>Two folders, one boundary (ADR-0003). Tenants own what runs: <code>deploy/tenants/&lt;tenant&gt;/</code>. The Infra Admin owns the walls and the capacity: <code>infra/tenants/&lt;tenant&gt;/</code>. In this lab you play both, so keep track of which hat you are wearing.</p>
+<table>
+<thead><tr><th>You want</th><th>Kubernetes object</th><th>AWS twin</th></tr></thead>
+<tbody>
+<tr><td>A boundary Tenants cannot see across</td><td>Namespace</td><td>A separate account, or a separate ECS cluster</td></tr>
+<tr><td>A ceiling on what a Tenant can reserve</td><td>ResourceQuota</td><td>A capacity provider's auto scaling group maximum</td></tr>
+<tr><td>Defaults and per-container maximums</td><td>LimitRange</td><td>No twin: a task definition must state a size, so nothing fills one in</td></tr>
+<tr><td>An admin who can only touch their own Tenant</td><td>ServiceAccount, Role, RoleBinding</td><td>An IAM role with a policy scoped by resource</td></tr>
+<tr><td>Pods that cannot talk across Tenants</td><td>NetworkPolicy</td><td>Security groups</td></tr>
+</tbody>
+</table>
+</section>
+
+<section class="step" data-step="s0">
+<h2>Before you start</h2>
+<p>Prerequisite: phase 2's end state in dc-east (chat on 0.1.1 with probes, resources, and an HPA, all in the <code>default</code> namespace, ingress-nginx answering on 8080). Confirm it:</p>
+<pre><code>kubectl --context kind-dc-east get deploy,svc,ingress,hpa -l tenant=acme</code></pre>
+<p>Start the command journal in this terminal. It writes to the gitignored <code>.journal/phase-3.log</code> and records only this terminal:</p>
+<pre><code>source scripts/lab-journal.sh start phase-3</code></pre>
+</section>
+
+<section class="step" data-step="s1">
+<h2>Step 1: Namespaces, the first wall</h2>
+<p>Everything so far landed in <code>default</code>, which is where objects go when nobody says otherwise. A namespace is a named scope for objects: names only have to be unique inside it, and every wall in this lab attaches to it. Wearing the Infra Admin hat, create <code>infra/tenants/acme/namespace.yaml</code>:</p>
+<pre><code>apiVersion: v1
+kind: Namespace
+metadata:
+  name: tnt-acme
+  labels:
+    forge.io/tenant: acme</code></pre>
+<p>And <code>infra/tenants/stark/namespace.yaml</code>, the same shape with <code>tnt-stark</code> and <code>stark</code>. Apply both:</p>
+<pre><code>kubectl --context kind-dc-east apply -f infra/tenants/acme/namespace.yaml -f infra/tenants/stark/namespace.yaml</code></pre>
+<pre><code>kubectl --context kind-dc-east get namespaces --show-labels</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Your two namespaces beside <code>default</code>, <code>ingress-nginx</code>, <code>kube-system</code>, and the others Kubernetes runs for itself.</p>
+</details>
+<p class="predict">With no <code>-n</code> flag, which namespace does this list, and how many chat pods does it show?</p>
+<pre><code>kubectl --context kind-dc-east get pods</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>The two chat pods. Without <code>-n</code>, kubectl uses the namespace in your context, which is <code>default</code>. Nothing has moved yet.</p>
+</details>
+<details class="aside"><summary>What a namespace is not</summary>
+<p>A namespace is a scope, not a wall by itself. Pods in <code>tnt-acme</code> can still reach pods in <code>tnt-stark</code>, and a kubeconfig with cluster-admin rights sees everything. The Quota, the Role, and the NetworkPolicy in the steps ahead are what turn the scope into a boundary. Nodes, namespaces themselves, and a few other objects are cluster-scoped and live in no namespace at all.</p>
+</details>
+<p class="sources">Docs: <a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/">Namespaces</a></p>
+</section>
+
+<section class="step" data-step="s2">
+<h2>Step 2: Move chat into tnt-acme</h2>
+<p>Acme's six files in <code>deploy/tenants/acme/</code> say nothing about a namespace, which is why chat landed in <code>default</code>. Add one line under <code>metadata:</code> in every file, at the same indent as <code>name:</code>:</p>
+<pre><code>  namespace: tnt-acme</code></pre>
+<p>Now apply the folder and watch what happens to the Ingress:</p>
+<p class="predict">For a moment, two Ingresses will claim the hostname <code>chat.acme.dc-east.localtest.me</code>, one in <code>default</code> and one in <code>tnt-acme</code>. What does ingress-nginx do with the second one?</p>
+<pre><code>kubectl --context kind-dc-east apply -f deploy/tenants/acme/</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Five objects <code>created</code> in <code>tnt-acme</code>, then a refusal from an admission webhook, a check the API server hands to ingress-nginx before it stores an Ingress:</p>
+<pre><code>Error from server (BadRequest): error when creating "deploy/tenants/acme/chat-ingress.yaml": admission webhook "validate.nginx.ingress.kubernetes.io" denied the request: host "chat.acme.dc-east.localtest.me" and path "/" is already defined in ingress default/chat</code></pre>
+</details>
+<p>The webhook refuses a second claim on a hostname rather than letting two Ingresses fight over it. Meanwhile the new chat pods are starting in their new home, and the old ones still serve Acme:</p>
+<pre><code>kubectl --context kind-dc-east -n tnt-acme get pods</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Two chat pods, <code>Running 1/1</code> once the model loads.</p>
+</details>
+<p>Retire the old objects. Every Acme object carries the <code>tenant=acme</code> label, so one command finds them all:</p>
+<pre><code>kubectl --context kind-dc-east -n default delete deploy,svc,ingress,hpa,configmap,secret -l tenant=acme</code></pre>
+<p>With the hostname free, apply again:</p>
+<pre><code>kubectl --context kind-dc-east apply -f deploy/tenants/acme/</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Five objects <code>unchanged</code> (the Secret says <code>configured</code>, as always) and the Ingress <code>created</code>.</p>
+</details>
+<pre><code>curl http://chat.acme.dc-east.localtest.me:8080/readyz</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p><code>{"status":"ready","model":"acme-chat-1"}</code>. For up to several seconds after the apply, nginx still routes the old, deleted Ingress and answers 502, then reloads and serves 200. Retry until it does.</p>
+</details>
+<p><button class="check" data-url="http://chat.acme.dc-east.localtest.me:8080/readyz">Check: chat /readyz</button></p>
+<pre><code>kubectl --context kind-dc-east get all -n default</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Only the <code>kubernetes</code> Service. Acme has left the building.</p>
+</details>
+<details class="aside"><summary>Why the migration had a gap</summary>
+<p>Between the delete and the second apply, nginx had no route for the hostname and answered 404, and for a few seconds after the apply it answered 502 while it reloaded. Zero-downtime moves across namespaces need a second hostname or a router in front, which is the Global Entry Point's job in phase 4. Here the gap was a few seconds, and the point was to see the conflict.</p>
+</details>
+<p class="sources">Docs: <a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/#working-with-namespaces">Working with namespaces</a> · <a href="https://kubernetes.github.io/ingress-nginx/how-it-works/#avoiding-outage-from-wrong-configuration">ingress-nginx: avoiding outage from wrong configuration</a></p>
+</section>
+
+<section class="step" data-step="s3">
+<h2>Step 3: A ceiling for Acme</h2>
+<p>A ResourceQuota adds up what a namespace has reserved and refuses anything that would push a total past its ceiling. Create <code>infra/tenants/acme/quota.yaml</code>:</p>
+<pre><code>apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: tenant-quota
+  namespace: tnt-acme
+spec:
+  hard:
+    requests.cpu: "2"
+    requests.memory: 2Gi
+    limits.cpu: "4"
+    limits.memory: 4Gi
+    pods: "10"</code></pre>
+<p>Chat at its HPA maximum of six pods reserves 600m of CPU and 768Mi of memory, so Acme has room to grow inside this ceiling. Pair it with a LimitRange, <code>infra/tenants/acme/limitrange.yaml</code>, which fills in requests and limits for any container that forgets to ask, and caps what one container may ask for:</p>
+<pre><code>apiVersion: v1
+kind: LimitRange
+metadata:
+  name: tenant-limits
+  namespace: tnt-acme
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
+      default:
+        cpu: 500m
+        memory: 256Mi
+      max:
+        cpu: "2"
+        memory: 2Gi</code></pre>
+<pre><code>kubectl --context kind-dc-east apply -f infra/tenants/acme/quota.yaml -f infra/tenants/acme/limitrange.yaml</code></pre>
+<p class="predict">The Quota reports what Acme has used. Right after chat moved in with two pods, what number sits in the <code>requests.cpu</code> Used column?</p>
+<pre><code>kubectl --context kind-dc-east -n tnt-acme describe quota tenant-quota</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Five rows, alphabetical: limits.cpu <code>1</code> of 4, limits.memory <code>512Mi</code> of 4Gi, pods 2 of 10, requests.cpu <code>200m</code> of 2, requests.memory <code>256Mi</code> of 2Gi. Two pods at 100m and 128Mi requests and 500m and 256Mi limits: phase 2's numbers are now the currency of the Quota.</p>
+</details>
+<p>Now the LimitRange at work. Start a pod that asks for nothing:</p>
+<pre><code>kubectl --context kind-dc-east -n tnt-acme run tester --image=curlimages/curl --restart=Never -- sleep 300</code></pre>
+<pre><code>kubectl --context kind-dc-east -n tnt-acme get pod tester -o jsonpath='{.spec.containers[0].resources}{"\n"}'</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>The pod carries requests of 100m and 128Mi and limits of 500m and 256Mi that you never wrote. The LimitRange filled them in at admission, the API server's checks on a request before it stores the object.</p>
+</details>
+<details class="aside"><summary>Why a Quota without a LimitRange rejects pods</summary>
+<p>Once a Quota constrains requests and limits, the API server refuses any pod in that namespace that does not state them, because it cannot add an unknown to the total. To see it: delete the tester pod (the command below), delete the LimitRange, run the tester command again, and you get:</p>
+<pre><code>Error from server (Forbidden): pods "tester" is forbidden: failed quota: tenant-quota: must specify limits.cpu for: tester; limits.memory for: tester; requests.cpu for: tester; requests.memory for: tester</code></pre>
+<p>The LimitRange's defaults are what keep Tenants from hitting that wall by accident. In ECS terms, the task definition always states a size, so this trap never existed there. Re-apply the LimitRange if you tried it.</p>
+</details>
+<pre><code>kubectl --context kind-dc-east -n tnt-acme delete pod tester</code></pre>
+<p class="sources">Docs: <a href="https://kubernetes.io/docs/concepts/policy/resource-quotas/">Resource Quotas</a> · <a href="https://kubernetes.io/docs/concepts/policy/limit-range/">Limit Ranges</a></p>
+</section>
+
+<section class="step solo" data-step="s4">
+<h2>On your own: a smaller ceiling for Stark</h2>
+<p>Goal: <code>tnt-stark</code> carries a ResourceQuota named <code>tenant-quota</code> and a LimitRange named <code>tenant-limits</code>, as files under <code>infra/tenants/stark/</code>. Stark is a smaller Tenant: requests.cpu <code>1500m</code>, requests.memory <code>1536Mi</code>, limits.cpu <code>4</code>, limits.memory <code>4Gi</code>, pods <code>6</code>. The LimitRange is identical to Acme's. You wrote both objects in step 3; only the namespace and the numbers change.</p>
+<p>Prove it:</p>
+<pre><code>kubectl --context kind-dc-east -n tnt-stark describe quota tenant-quota &amp;&amp; kubectl --context kind-dc-east -n tnt-stark describe limitrange tenant-limits</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Hard values as listed with Used all zero, then a LimitRange whose Container row shows min none, max 2 CPU and 2Gi, default request 100m and 128Mi, and default limit 500m and 256Mi.</p>
+</details>
+<details class="hint"><summary>Show the commands</summary>
+<p><code>infra/tenants/stark/quota.yaml</code>:</p>
+<pre><code>apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: tenant-quota
+  namespace: tnt-stark
+spec:
+  hard:
+    requests.cpu: 1500m
+    requests.memory: 1536Mi
+    limits.cpu: "4"
+    limits.memory: 4Gi
+    pods: "6"</code></pre>
+<p><code>infra/tenants/stark/limitrange.yaml</code> is Acme's with <code>namespace: tnt-stark</code>. Then:</p>
+<pre><code>kubectl --context kind-dc-east apply -f infra/tenants/stark/</code></pre>
+</details>
+</section>
+
+<section class="step" data-step="s5">
+<h2>Step 4: jarvis moves in and hits the wall</h2>
+<p>Put on the Tenant hat. Stark's jarvis is a batch summarizer: slower per request, and sized generously by an engineer who never read the Quota. It runs a newer build of fake-inference. Build and load it:</p>
+<pre><code>docker build -t forge/fake-inference:0.1.2 --build-arg APP_VERSION=0.1.2 services/fake-inference/</code></pre>
+<pre><code>kind load docker-image forge/fake-inference:0.1.2 --name dc-east</code></pre>
+<p>Create <code>deploy/tenants/stark/jarvis-config.yaml</code>:</p>
+<pre><code>apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jarvis-config
+  namespace: tnt-stark
+  labels:
+    tenant: stark
+data:
+  MODEL_NAME: stark-jarvis-1
+  SIMULATED_DELAY_MS: "800"
+  BURN_CPU_MS: "0"</code></pre>
+<p>And <code>deploy/tenants/stark/jarvis-deployment.yaml</code>, chat's shape with Stark's names and a request of one whole CPU and 1Gi per pod:</p>
+<pre><code>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jarvis
+  namespace: tnt-stark
+  labels:
+    app: jarvis
+    tenant: stark
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: jarvis
+  template:
+    metadata:
+      labels:
+        app: jarvis
+        tenant: stark
+    spec:
+      containers:
+        - name: fake-inference
+          image: forge/fake-inference:0.1.2
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: jarvis-config
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 1Gi</code></pre>
+<pre><code>kubectl --context kind-dc-east apply -f deploy/tenants/stark/</code></pre>
+<p class="predict">Stark's Quota allows 1500m of CPU requests. Each jarvis pod asks for 1000m. How many pods start, and where will you find the rest?</p>
+<pre><code>kubectl --context kind-dc-east -n tnt-stark get deploy,pods</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>The Deployment sits at <code>1/2</code> and only one pod exists. Nothing is Pending, because the second pod was never created: the Quota refuses it at admission, before the scheduler ever sees it. That silence is why Quota failures go unnoticed.</p>
+</details>
+<p>The refusal is recorded as an event on the object that tried, the ReplicaSet. Events are namespaced objects of their own, so ask for them directly:</p>
+<pre><code>kubectl --context kind-dc-east -n tnt-stark get events --field-selector reason=FailedCreate</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<pre><code>Error creating: pods "jarvis-76b546b58b-4xpcp" is forbidden: exceeded quota: tenant-quota, requested: requests.cpu=1,requests.memory=1Gi, used: requests.cpu=1,requests.memory=1Gi, limited: requests.cpu=1500m,requests.memory=1536Mi</code></pre>
+<p>Several rows, all with that message. Requested plus used would pass limited, so the pod was refused. The ReplicaSet keeps retrying, and the delay between retries doubles after every refusal.</p>
+</details>
+<pre><code>kubectl --context kind-dc-east -n tnt-stark describe quota tenant-quota</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Used <code>1</code> of 1500m CPU and <code>1Gi</code> of 1536Mi memory. One more pod of the same size would need 2 and 2Gi.</p>
+</details>
+<details class="aside"><summary>Why the ECS version of the Quota wall is quieter still</summary>
+<p>ECS has no per-Tenant reservation ceiling inside a cluster. A task that does not fit stays in PROVISIONING or the service event log says it could not place it, and the fix is more capacity. Kubernetes lets the Infra Admin say "this Tenant gets this much" and makes the Tenant resize, which is exactly the Quota Request conversation from ADR-0003.</p>
+</details>
+<p class="sources">Docs: <a href="https://kubernetes.io/docs/concepts/policy/resource-quotas/#compute-resource-quota">Resource Quotas: compute resources</a> · <a href="https://kubernetes.io/docs/reference/kubectl/generated/kubectl_get/">kubectl get events</a></p>
+</section>
+
+<section class="step" data-step="s5b">
+<h2>Step 5: Resize jarvis and roll it out</h2>
+<p>Stark's engineer files a Quota Request and the Infra Admin says no: jarvis does not need a whole CPU to sleep for 800 milliseconds. Resize it. In <code>jarvis-deployment.yaml</code> change the requests to <code>cpu: 500m</code> and <code>memory: 512Mi</code>, leave the limits, then apply and watch:</p>
+<p class="predict">Two pods at 500m fit inside 1500m. Will the rollout complete?</p>
+<pre><code>kubectl --context kind-dc-east apply -f deploy/tenants/stark/jarvis-deployment.yaml &amp;&amp; kubectl --context kind-dc-east -n tnt-stark rollout status deployment/jarvis --timeout=30s</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>It does not. <code>rollout status</code> times out with "1 out of 2 new replicas have been updated", and <code>get deploy jarvis</code> shows <code>READY 2/2</code> next to <code>UP-TO-DATE 1</code>: the old one-CPU pod plus one new pod, both serving, and the rollout stuck between them.</p>
+</details>
+<pre><code>kubectl --context kind-dc-east -n tnt-stark get deploy jarvis &amp;&amp; kubectl --context kind-dc-east -n tnt-stark get events --field-selector reason=FailedCreate</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>A fresh refusal: the second new pod would need 500m on top of the 1000m the old pod holds and the 500m the first new pod holds, and 2000m passes 1500m.</p>
+</details>
+<p>This is the second wall, and it is a subtler one. Phase 2's rolling update creates before it destroys: with two replicas it may surge one extra pod and may not retire an old one until two new pods are available. The surge pod took Stark's last 500m. The second new pod needs Quota the old pod still holds, and the old pod cannot go first. A Tenant at its ceiling cannot surge; it has to replace. Tell the Deployment so, in <code>jarvis-deployment.yaml</code> under <code>spec:</code>, at the same indent as <code>replicas:</code>:</p>
+<pre><code>  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1</code></pre>
+<pre><code>kubectl --context kind-dc-east apply -f deploy/tenants/stark/jarvis-deployment.yaml &amp;&amp; kubectl --context kind-dc-east -n tnt-stark rollout status deployment/jarvis --timeout=180s</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>The old pod goes first, the second new pod fits, and the rollout completes: <code>2/2</code>, <code>UP-TO-DATE 2</code>, Used <code>1</code> of 1500m. If you spent a while reading before this apply, the ReplicaSet's retry delay has grown with every refusal and the wait can pass three minutes; run <code>rollout status</code> again rather than assuming a failure, or force a fresh ReplicaSet with no backoff: <code>kubectl --context kind-dc-east -n tnt-stark rollout restart deployment/jarvis</code>.</p>
+</details>
+<details class="aside"><summary>Why this matters more for inference than for web apps</summary>
+<p>A surge rollout borrows capacity for a moment. Web tiers usually have it. A GPU fleet usually does not: every accelerator is allocated, and a model server that needs a whole GPU cannot surge into a spare one that does not exist. Replace-in-place rollouts, with a brief dip in capacity, are how capacity-bound serving fleets roll. ECS says the same thing with <code>minimumHealthyPercent</code> 50 and <code>maximumPercent</code> 100.</p>
+</details>
+<p class="sources">Docs: <a href="https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#strategy">Deployment strategy</a> · <a href="https://kubernetes.io/docs/concepts/policy/resource-quotas/#quota-and-cluster-capacity">Quota and cluster capacity</a></p>
+</section>
+
+<section class="step solo" data-step="s6">
+<h2>On your own: a front door for jarvis</h2>
+<p>Goal: jarvis answers at <code>http://jarvis.stark.dc-east.localtest.me:8080</code> through the shared ingress-nginx. That takes a Service and an Ingress in <code>tnt-stark</code>, as <code>deploy/tenants/stark/jarvis-service.yaml</code> and <code>jarvis-ingress.yaml</code>. You built both for chat in phase 1, steps 3 and 5; only the names, the namespace, and the hostname change. Label both <code>tenant: stark</code>.</p>
+<p>Prove it:</p>
+<pre><code>curl http://jarvis.stark.dc-east.localtest.me:8080/readyz</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p><code>{"status":"ready","model":"stark-jarvis-1"}</code>. In the first few seconds nginx answers 404, then 503 while it reloads; retry until the ready line appears.</p>
+</details>
+<pre><code>curl -s -X POST http://jarvis.stark.dc-east.localtest.me:8080/v1/completions -H 'Content-Type: application/json' -d '{"prompt":"summarize this"}'</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>A completion from <code>stark-jarvis-1</code> with <code>"version":"0.1.2"</code> and a latency near 800 ms. Two Tenants, one nginx, split by hostname.</p>
+</details>
+<p><button class="check" data-url="http://jarvis.stark.dc-east.localtest.me:8080/readyz">Check: jarvis /readyz</button></p>
+<details class="hint"><summary>Show the commands</summary>
+<p><code>jarvis-service.yaml</code>:</p>
+<pre><code>apiVersion: v1
+kind: Service
+metadata:
+  name: jarvis
+  namespace: tnt-stark
+  labels:
+    tenant: stark
+spec:
+  selector:
+    app: jarvis
+  ports:
+    - port: 80
+      targetPort: 8000</code></pre>
+<p><code>jarvis-ingress.yaml</code>:</p>
+<pre><code>apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: jarvis
+  namespace: tnt-stark
+  labels:
+    tenant: stark
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: jarvis.stark.dc-east.localtest.me
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: jarvis
+                port:
+                  number: 80</code></pre>
+<pre><code>kubectl --context kind-dc-east apply -f deploy/tenants/stark/</code></pre>
+</details>
+</section>
+
+<section class="step" data-step="s7">
+<h2>Step 6: An Acme admin who cannot see Stark</h2>
+<p>So far every command ran as the cluster admin kind gave you. Tenants do not get that. Kubernetes has no user objects; it trusts whatever the API server's authentication says and then asks RBAC what that identity may do. For a Tenant admin we use a ServiceAccount, a Role listing the verbs it may use on which resources in one namespace, and a RoleBinding tying the two together. Infra Admin hat on. Create <code>infra/tenants/acme/rbac.yaml</code>:</p>
+<pre><code>apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: acme-admin
+  namespace: tnt-acme
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tenant-admin
+  namespace: tnt-acme
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "configmaps", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["resourcequotas", "limitranges"]
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: acme-admin
+  namespace: tnt-acme
+subjects:
+  - kind: ServiceAccount
+    name: acme-admin
+    namespace: tnt-acme
+roleRef:
+  kind: Role
+  name: tenant-admin
+  apiGroup: rbac.authorization.k8s.io</code></pre>
+<p>Read the Role as ADR-0003 in YAML: a Tenant owns its Services and can read, but not change, its Quota and its NetworkPolicies. One rule per API group, because a rule that lists several groups and several resources grants every combination, and <code>auth can-i --list</code> would show nonsense such as <code>ingresses.autoscaling</code>.</p>
+<pre><code>kubectl --context kind-dc-east apply -f infra/tenants/acme/rbac.yaml</code></pre>
+<p>Mint a token for the ServiceAccount and build a kubeconfig around it. Start from your own, then swap the credentials out. The file name ends in <code>.kubeconfig</code>, which the repo's gitignore already covers:</p>
+<pre><code>TOKEN=$(kubectl --context kind-dc-east -n tnt-acme create token acme-admin --duration=8h)</code></pre>
+<pre><code>kubectl config view --minify --context kind-dc-east --flatten &gt; acme.kubeconfig</code></pre>
+<pre><code>kubectl --kubeconfig acme.kubeconfig config set-credentials acme-admin --token="$TOKEN"</code></pre>
+<pre><code>kubectl --kubeconfig acme.kubeconfig config set-context kind-dc-east --user=acme-admin --namespace=tnt-acme</code></pre>
+<pre><code>kubectl --kubeconfig acme.kubeconfig config unset users.kind-dc-east</code></pre>
+<details class="aside"><summary>Why the unset matters</summary>
+<p><code>--flatten</code> copied your cluster-admin certificate into the new file. The <code>unset</code> removes it, so the file holds only the token and the cluster's public CA. Check with <code>grep -c client-certificate-data acme.kubeconfig</code>: the answer must be 0 before you would ever hand such a file to a Tenant. grep exits 1 when the count is 0, which is the answer you want, and the journal will record that exit code.</p>
+</details>
+<p>Now act as Acme:</p>
+<pre><code>kubectl --kubeconfig acme.kubeconfig get pods</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>The two chat pods. The file's current context already names the cluster, the user, and <code>tnt-acme</code>, so neither <code>--context</code> nor <code>-n</code> is needed.</p>
+</details>
+<pre><code>kubectl --kubeconfig acme.kubeconfig get pods -n tnt-stark</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<pre><code>Error from server (Forbidden): pods is forbidden: User "system:serviceaccount:tnt-acme:acme-admin" cannot list resource "pods" in API group "" in the namespace "tnt-stark"</code></pre>
+<p>The identity is the ServiceAccount, spelled the way RBAC sees it.</p>
+</details>
+<p class="predict">Nodes belong to no namespace. Will the Acme admin be allowed to list them?</p>
+<pre><code>kubectl --kubeconfig acme.kubeconfig get nodes</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<pre><code>Error from server (Forbidden): nodes is forbidden: User "system:serviceaccount:tnt-acme:acme-admin" cannot list resource "nodes" in API group "" at the cluster scope</code></pre>
+<p>A Role reaches only inside its namespace; cluster-scoped objects need a ClusterRole, which no Tenant gets.</p>
+</details>
+<pre><code>kubectl --kubeconfig acme.kubeconfig auth can-i --list</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>The Role's resources and verbs, plus rows every authenticated identity gets: the <code>selfsubject*</code> reviews, <code>clustertrustbundles</code>, and a list of non-resource URLs such as <code>/healthz</code>. This is the command to reach for when a Tenant asks "what am I allowed to do?"</p>
+</details>
+<p>Reading Stark was refused. Changing Stark must be too:</p>
+<pre><code>kubectl --kubeconfig acme.kubeconfig -n tnt-stark scale deployment jarvis --replicas=0</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Forbidden, naming the same ServiceAccount and the namespace <code>tnt-stark</code>. jarvis keeps its two replicas.</p>
+</details>
+<pre><code>kubectl --kubeconfig acme.kubeconfig delete resourcequota tenant-quota</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<pre><code>Error from server (Forbidden): resourcequotas "tenant-quota" is forbidden: User "system:serviceaccount:tnt-acme:acme-admin" cannot delete resource "resourcequotas" in API group "" in the namespace "tnt-acme"</code></pre>
+<p>Acme can read its ceiling and cannot move it.</p>
+</details>
+<details class="aside"><summary>Why a token and not a user</summary>
+<p>Production clusters authenticate humans through OIDC (Okta, Google, Entra) and map groups to RoleBindings; the Forge Console will fake that in phase 7 (ADR-0007). A ServiceAccount token is the built-in identity Kubernetes can mint on the spot, which makes it the right tool for a lab and for machine clients. This one expires in eight hours; mint another if the drill's preflight says so.</p>
+</details>
+<p class="sources">Docs: <a href="https://kubernetes.io/docs/reference/access-authn-authz/rbac/">Using RBAC authorization</a> · <a href="https://kubernetes.io/docs/reference/kubectl/generated/kubectl_create/kubectl_create_token/">kubectl create token</a> · <a href="https://kubernetes.io/docs/reference/access-authn-authz/authorization/#checking-api-access">Checking API access</a></p>
+</section>
+
+<section class="step" data-step="s8">
+<h2>Step 7: Pods that cannot cross the hall</h2>
+<p>Inside a cluster every pod can reach every other pod by default. Prove that the wall is not there yet by curling jarvis's Service from inside Acme's namespace, using its cluster DNS name <code>jarvis.tnt-stark</code>:</p>
+<pre><code>kubectl --context kind-dc-east -n tnt-acme run tester --rm -i --quiet --restart=Never --image=curlimages/curl -- curl -sS -m 5 http://jarvis.tnt-stark/healthz</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Exactly <code>{"status":"ok"}</code>. Acme just talked to Stark's model server. The tester pod stands in for a chat pod: the policy you are about to write is evaluated on jarvis's side, so any pod in <code>tnt-acme</code> is the same test.</p>
+</details>
+<p>A NetworkPolicy selects pods and lists who may talk to them. A policy that selects every pod and allows nobody is the default-deny wall; further policies punch holes, and holes add up. Two holes are required: pods of the same Tenant, and ingress-nginx, or the front door stops working too. Create <code>infra/tenants/acme/netpol.yaml</code>:</p>
+<pre><code>apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: tnt-acme
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-same-tenant
+  namespace: tnt-acme
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-nginx
+  namespace: tnt-acme
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx</code></pre>
+<figure class="diagram">
+<svg viewBox="0 0 640 210" role="img" aria-label="three policies in tnt-acme: default deny, allow same tenant, allow ingress-nginx; jarvis in tnt-stark is blocked">
+  <defs><marker id="arr3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <rect class="box" x="230" y="10" width="200" height="190" rx="8"/>
+  <text x="330" y="30" text-anchor="middle">tnt-acme</text>
+  <text class="small" x="330" y="46" text-anchor="middle">default-deny-ingress on every pod</text>
+  <rect class="box-accent" x="250" y="60" width="160" height="50"/>
+  <text x="330" y="82" text-anchor="middle">chat pod</text>
+  <text class="small" x="330" y="98" text-anchor="middle">:8000</text>
+  <rect class="box-accent" x="250" y="130" width="160" height="50"/>
+  <text x="330" y="152" text-anchor="middle">chat pod</text>
+  <text class="small" x="330" y="168" text-anchor="middle">allow-same-tenant</text>
+  <rect class="box" x="10" y="60" width="180" height="50"/>
+  <text x="100" y="82" text-anchor="middle">ingress-nginx pod</text>
+  <text class="small" x="100" y="98" text-anchor="middle">namespace ingress-nginx</text>
+  <path class="arrow" style="marker-end:url(#arr3)" d="M192 85 H246"/>
+  <text class="small" x="219" y="78" text-anchor="middle">allow</text>
+  <rect class="box" x="470" y="60" width="160" height="50"/>
+  <text x="550" y="82" text-anchor="middle">jarvis pod</text>
+  <text class="small" x="550" y="98" text-anchor="middle">namespace tnt-stark</text>
+  <path class="arrow" style="marker-end:url(#arr3)" d="M466 85 H414"/>
+  <text class="small" x="440" y="78" text-anchor="middle">drop</text>
+  <path class="arrow" style="marker-end:url(#arr3)" d="M330 112 V126"/>
+</svg>
+<figcaption>Acme's wall: default deny on every pod, with two holes that add up, one for pods in the same namespace and one for the ingress-nginx namespace. A jarvis pod matches neither hole, so its packets are dropped.</figcaption>
+</figure>
+<p>And <code>infra/tenants/stark/netpol.yaml</code>, identical with <code>namespace: tnt-stark</code>. Apply both:</p>
+<pre><code>kubectl --context kind-dc-east apply -f infra/tenants/acme/netpol.yaml -f infra/tenants/stark/netpol.yaml</code></pre>
+<p class="predict">The kubelet's readiness probes come from the node, not from a pod. Under default-deny, do chat and jarvis stay <code>Ready</code>?</p>
+<pre><code>kubectl --context kind-dc-east get pods -A -l tenant</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>All four pods stay <code>1/1 Running</code>. The kubelet's probes arrive from the node's own address on the pod network, and kind's plugin lets them through, so a default-deny policy does not take your pods out of service. Some plugins need an explicit hole for that; check the first time you turn on default deny anywhere new.</p>
+</details>
+<p>Now the wall:</p>
+<pre><code>kubectl --context kind-dc-east -n tnt-acme run tester --rm -i --quiet --restart=Never --image=curlimages/curl -- curl -sS -m 5 http://jarvis.tnt-stark/healthz</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Five seconds of silence, then <code>curl: (28) Connection timed out after 5001 milliseconds</code>, then kubectl reporting the pod terminated with an error. The wall drops the packet rather than refusing the connection, so a blocked path looks like a timeout. Without <code>-m 5</code>, curl would wait over two minutes.</p>
+</details>
+<p>And the two holes. Same Tenant still talks, and the front door still opens:</p>
+<pre><code>kubectl --context kind-dc-east -n tnt-stark run tester --rm -i --quiet --restart=Never --image=curlimages/curl -- curl -sS -m 5 http://jarvis/healthz</code></pre>
+<pre><code>curl http://chat.acme.dc-east.localtest.me:8080/readyz &amp;&amp; curl http://jarvis.stark.dc-east.localtest.me:8080/readyz</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p><code>{"status":"ok"}</code> from inside Stark, then both <code>ready</code> lines through the ingress.</p>
+</details>
+<details class="aside"><summary>Where the wall is enforced</summary>
+<p>A NetworkPolicy is a request; the cluster's network plugin enforces it on each node, packet by packet, and a plugin that does not support policies silently allows everything. kind's plugin, kindnet, enforces them. Prove yours does:</p>
+<pre><code>kubectl --context kind-dc-east -n kube-system logs ds/kindnet | grep -i "policy engine"</code></pre>
+<p>Expect <code>Policy engine is ready</code>. On bare metal Forge would run Calico or Cilium for the same job. Security groups are the ECS twin: attached at the task's network interface, evaluated on the host, allow lists that add up.</p>
+</details>
+<details class="aside"><summary>The egress trap</summary>
+<p>These policies restrict <code>Ingress</code> only, so pods can still reach anything. A default-deny on <code>Egress</code> is stricter and bites in a way that surprises everyone once: it blocks the pod's DNS lookups too, so every hostname stops resolving until you add a hole for <code>kube-dns</code> on port 53. File that away for the day you tighten egress.</p>
+</details>
+<p class="sources">Docs: <a href="https://kubernetes.io/docs/concepts/services-networking/network-policies/">Network Policies</a> · <a href="https://kubernetes.io/docs/concepts/services-networking/network-policies/#default-policies">Default policies</a></p>
+</section>
+
+<section class="step" data-step="s9">
+<h2>Checkpoint</h2>
+<pre><code>kubectl --context kind-dc-east get namespaces,resourcequota,limitrange,networkpolicy -A | grep -E 'NAME|tnt'</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Two namespaces, each with <code>tenant-quota</code>, <code>tenant-limits</code>, and three NetworkPolicies.</p>
+</details>
+<pre><code>kubectl --context kind-dc-east get deploy -A -l tenant</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p><code>chat 2/2</code> in <code>tnt-acme</code> and <code>jarvis 2/2</code> in <code>tnt-stark</code>.</p>
+</details>
+<pre><code>kubectl --kubeconfig acme.kubeconfig get pods -n tnt-stark</code></pre>
+<details class="expected"><summary>Expected output</summary>
+<p>Forbidden.</p>
+</details>
+<p><button class="check" data-url="http://chat.acme.dc-east.localtest.me:8080/readyz">Check: chat /readyz</button></p>
+<p><button class="check" data-url="http://jarvis.stark.dc-east.localtest.me:8080/readyz">Check: jarvis /readyz</button></p>
+</section>
+
+<section class="step drill" data-step="d1">
+<h2>Drill: a wall in the wrong place</h2>
+<p>Three walls went up in this lab, and each can be misconfigured in a way that looks like something else. This drill injects one fault at random into dc-east: one hurts a Tenant's front door, one hurts a Tenant's admin, one hurts a Tenant's rollout. Find it, fix it, confirm with the check.</p>
+<pre><code>scripts/drills/phase-3.sh break</code></pre>
+<p>Give it a minute. Then walk both Tenants in the same order every time, and state what you see before opening a hint: the front doors, the admin, the rollouts.</p>
+<pre><code>curl -s -o /dev/null -m 10 -w '%{http_code}\n' http://chat.acme.dc-east.localtest.me:8080/readyz; curl -s -o /dev/null -m 10 -w '%{http_code}\n' http://jarvis.stark.dc-east.localtest.me:8080/readyz</code></pre>
+<pre><code>kubectl --kubeconfig acme.kubeconfig get pods</code></pre>
+<pre><code>kubectl --context kind-dc-east -n tnt-stark rollout status deployment/jarvis --timeout=10s</code></pre>
+<details class="hint"><summary>Hint 1: where to look</summary>
+<p>Each wall fails with its own signature. A front door that stops answering for one Tenant, curl giving up after ten seconds and reporting 000, means the network wall is blocking nginx itself: it can name the pod but cannot reach it. A <code>Forbidden</code> for the Acme admin on something the Role grants means RBAC changed. A jarvis rollout that never finishes, with a pod missing and nothing Pending, means the ReplicaSet is being refused at admission, which is the Quota's signature. In every case a live object no longer matches its file under <code>infra/tenants/</code>.</p>
+</details>
+<details class="hint"><summary>Hint 2: what to run</summary>
+<p>Your files are the desired state, so ask Kubernetes to diff them against what is live. <code>-R</code> recurses into the two tenant folders. The command prints a unified diff per object that differs, with the live value on the <code>-</code> lines and your file on the <code>+</code> lines. Ignore the <code>generation</code> hunk, which the dry run bumps on every object it would change. The exit code is the verdict: 0 clean, 1 drift found, 2 an error such as a missing <code>-R</code>.</p>
+<pre><code>kubectl --context kind-dc-east diff -R -f infra/tenants/</code></pre>
+<p>Then confirm the symptom at its source:</p>
+<pre><code>kubectl --context kind-dc-east -n tnt-acme describe networkpolicy</code></pre>
+<pre><code>kubectl --kubeconfig acme.kubeconfig auth can-i --list</code></pre>
+<pre><code>kubectl --context kind-dc-east -n tnt-stark get events --field-selector reason=FailedCreate --sort-by=.lastTimestamp</code></pre>
+<pre><code>kubectl --context kind-dc-east -n tnt-stark describe quota tenant-quota</code></pre>
+<p>Events live for an hour, so the refusals from step 4 are still listed. Read the LAST SEEN column: a live fault has rows seconds old, on a ReplicaSet name you have not seen before.</p>
+</details>
+<details class="hint"><summary>Hint 3: the fix, by symptom</summary>
+<table>
+<thead><tr><th>Symptom</th><th>What drifted</th><th>Fix</th></tr></thead>
+<tbody>
+<tr><td>chat's front door times out while jarvis's answers; <code>kubectl diff</code> flags a NetworkPolicy in tnt-acme</td><td>A NetworkPolicy in tnt-acme</td><td rowspan="3">Your files are the truth: <code>kubectl --context kind-dc-east apply -R -f infra/tenants/</code></td></tr>
+<tr><td>Acme's admin gets Forbidden on list, create, or delete</td><td>The tenant-admin Role</td></tr>
+<tr><td>jarvis down to one pod on the old template; events say exceeded quota</td><td>Stark's ResourceQuota</td></tr>
+</tbody>
+</table>
+<p>After the Quota is restored, nothing else is needed: the ReplicaSet keeps retrying, with a delay that doubles after every refusal, so the longer the fault ran, the longer the next retry. Expect a minute or two; if <code>check</code> says the rollout has not converged, wait and check again, or <code>rollout restart</code> jarvis to start a fresh ReplicaSet with no backoff.</p>
+</details>
+<p>When you think it is fixed:</p>
+<pre><code>scripts/drills/phase-3.sh check</code></pre>
+<p>Stuck? <code>scripts/drills/phase-3.sh undo</code> names the fault and repairs it. Run <code>break</code> again another day; the fault is picked at random each time.</p>
+<p class="sources">Docs: <a href="https://kubernetes.io/docs/reference/kubectl/generated/kubectl_diff/">kubectl diff</a></p>
+</section>
+
+<section>
+<h2>What you learned</h2>
+<ul>
+<li>A namespace is a scope. Quota, RBAC, and NetworkPolicy attach to it and turn it into a boundary.</li>
+<li>Quota refusals happen at admission and show up as events, not as Pending pods. Requests and limits are the currency; a LimitRange keeps every pod paying in it.</li>
+<li>A Tenant at its ceiling cannot surge. Replace-in-place rollouts (<code>maxSurge: 0</code>) are how capacity-bound fleets roll, GPU fleets included.</li>
+<li>RBAC grants verbs on resources to an identity, inside one namespace for a Role. Nothing is allowed until something allows it.</li>
+<li>NetworkPolicies are allow lists that add up on top of a default deny, enforced by the network plugin on each node. Same-Tenant traffic and ingress-nginx need explicit holes.</li>
+<li>Two folders mark the boundary from ADR-0003: Tenants own <code>deploy/</code>, the Infra Admin owns <code>infra/</code>.</li>
+<li><code>kubectl diff</code> compares live objects with your files, which is how you find drift without reading YAML by eye.</li>
+</ul>
+</section>
+
+<section>
+<h2>ECS and Cloud Run mapping</h2>
+<table>
+<thead><tr><th>Kubernetes</th><th>AWS ECS</th><th>GCP Cloud Run</th></tr></thead>
+<tbody>
+<tr><td>Namespace</td><td>Separate cluster or account</td><td>Project</td></tr>
+<tr><td>ResourceQuota</td><td>Capacity provider auto scaling group maximum</td><td>Project quotas</td></tr>
+<tr><td>LimitRange</td><td>No twin: a task definition must state a size</td><td>Service CPU and memory settings</td></tr>
+<tr><td>ServiceAccount plus Role plus RoleBinding</td><td>IAM role and policy scoped by resource</td><td>IAM roles on the project</td></tr>
+<tr><td>NetworkPolicy</td><td>Security groups</td><td>Ingress settings and VPC egress settings</td></tr>
+<tr><td>kubectl diff</td><td>CloudFormation change set</td><td>Deployment Manager preview</td></tr>
+</tbody>
+</table>
+<p>Next: phase 4 (<a href="https://github.com/jimmie-potts/kubernetes-practice/issues/6">#6</a>), where dc-west wakes up, both Tenants run in both data centers, and one data center dies on purpose.</p>
+</section>
+
+<section class="quiz">
+<h2>Check yourself</h2>
+<div class="q">
+<p class="question">1. Acme's admin runs <code>kubectl get nodes</code> with the acme kubeconfig and is refused. Why, when the Role grants <code>list</code>?</p>
+<label class="option"><input type="radio" name="q1"> Nodes require the <code>watch</code> verb, which the Role omits</label>
+<label class="option" data-correct="true"><input type="radio" name="q1"> Nodes are cluster-scoped; a Role only reaches objects inside its namespace</label>
+<label class="option"><input type="radio" name="q1"> The token expired</label>
+<label class="option"><input type="radio" name="q1"> ServiceAccounts can never read nodes</label>
+<div class="explain" hidden>A Role and RoleBinding grant rights inside one namespace. Cluster-scoped objects such as nodes and namespaces need a ClusterRole, which no Tenant receives.</div>
+</div>
+<div class="q">
+<p class="question">2. jarvis asked for two pods and got one. Where did the second one go?</p>
+<label class="option"><input type="radio" name="q2"> It is Pending until a node frees up CPU</label>
+<label class="option"><input type="radio" name="q2"> The LimitRange capped the Deployment at one replica</label>
+<label class="option" data-correct="true"><input type="radio" name="q2"> The Quota refused its creation at admission, and the ReplicaSet recorded the refusal in its events</label>
+<label class="option"><input type="radio" name="q2"> The scheduler evicted it to protect chat</label>
+<div class="explain" hidden>Quota is enforced when the pod is created, before scheduling. The pod never exists, so nothing is Pending; the ReplicaSet's FailedCreate event is the only trace.</div>
+</div>
+<div class="q">
+<p class="question">3. Why does the lab pair every ResourceQuota with a LimitRange?</p>
+<label class="option"><input type="radio" name="q3"> A Quota cannot be created in a namespace without one</label>
+<label class="option" data-correct="true"><input type="radio" name="q3"> Once a Quota counts requests, any pod that states no request is refused; the LimitRange fills requests in so ordinary pods still start</label>
+<label class="option"><input type="radio" name="q3"> The LimitRange is what makes the Quota's numbers visible in <code>describe</code></label>
+<label class="option"><input type="radio" name="q3"> LimitRange enforces the Quota on the nodes</label>
+<div class="explain" hidden>The API server cannot add an unknown to a total, so a Quota on requests.cpu rejects pods with no CPU request. The LimitRange's defaults keep that from becoming a trap for every tester pod and one-off job.</div>
+</div>
+<div class="q">
+<p class="question">4. After default-deny in <code>tnt-acme</code>, requests through the ingress still work. Which policy makes that true?</p>
+<label class="option"><input type="radio" name="q4"> <code>default-deny-ingress</code>, because ingress-nginx traffic is not pod traffic</label>
+<label class="option"><input type="radio" name="q4"> <code>allow-same-tenant</code>, because nginx runs inside the cluster</label>
+<label class="option" data-correct="true"><input type="radio" name="q4"> <code>allow-ingress-nginx</code>, which admits traffic from pods in the namespace labeled <code>ingress-nginx</code></label>
+<label class="option"><input type="radio" name="q4"> None; the Ingress object bypasses NetworkPolicy</label>
+<div class="explain" hidden>The controller is a pod in the ingress-nginx namespace, so its traffic is pod traffic and default-deny would block it. The namespaceSelector hole is what keeps the front door open, and the drill breaks exactly that.</div>
+</div>
+<div class="q">
+<p class="question">5. Two Ingresses claim the same hostname during the move. What did ingress-nginx do?</p>
+<label class="option"><input type="radio" name="q5"> Load-balanced between both backends</label>
+<label class="option"><input type="radio" name="q5"> Preferred the newer one</label>
+<label class="option" data-correct="true"><input type="radio" name="q5"> Its admission webhook refused to create the second one until the first was gone</label>
+<label class="option"><input type="radio" name="q5"> Created both and served the older one silently</label>
+<div class="explain" hidden>The validating webhook rejects an Ingress whose host and path are already defined by another Ingress, which is why the first apply left the new Ingress uncreated and the second apply, after the delete, succeeded.</div>
+</div>
+<div class="q">
+<p class="question">6. Which command tells you, in one shot, which live object no longer matches the files under <code>infra/tenants/</code>?</p>
+<label class="option"><input type="radio" name="q6"> <code>kubectl get -f infra/tenants/ -o yaml</code></label>
+<label class="option" data-correct="true"><input type="radio" name="q6"> <code>kubectl diff -R -f infra/tenants/</code></label>
+<label class="option"><input type="radio" name="q6"> <code>kubectl apply -f infra/tenants/ --dry-run=client</code></label>
+<label class="option"><input type="radio" name="q6"> <code>kubectl describe -f infra/tenants/</code></label>
+<div class="explain" hidden>kubectl diff sends each file through a server-side dry run and prints a unified diff against the live object, exiting 1 when anything differs; -R is what makes it descend into the tenant folders. A client dry run only validates the files; get and describe show live state without comparing it.</div>
+</div>
+</section>
+
+<section class="teach-back">
+<h2>Teach it back</h2>
+<p>Write the answer in your own words, as if to a colleague who knows ECS but not Kubernetes. A model answer unlocks after you write a sentence or two. When you report this phase done, copy your answers and paste them in the chat for review.</p>
+<div class="tb" data-tb="t1">
+<p class="prompt">Explain to an ECS engineer how Forge keeps Acme and Stark apart: namespace, ResourceQuota with LimitRange, RBAC, and NetworkPolicy, one sentence each with the nearest AWS twin.</p>
+<textarea rows="6" placeholder="Namespace: ..."></textarea>
+<details class="model"><summary>Compare with a model answer</summary>
+<p>Namespace: a named scope that every other wall attaches to, like giving each Tenant its own ECS cluster. ResourceQuota with LimitRange: a ceiling on what the Tenant may reserve, with defaults so every pod states a size, like a service quota plus a task definition that always declares CPU and memory. RBAC: a ServiceAccount bound by a Role to a list of verbs on resources inside that namespace only, like an IAM role whose policy is scoped to one cluster's resources. NetworkPolicy: allow lists on top of a default deny, enforced by the network plugin on each node, like security groups on the task's network interface.</p>
+</details>
+</div>
+<div class="tb" data-tb="t2">
+<p class="prompt">Interview question: "A tenant says their Deployment shows 1/2 and the second pod never appears. Nothing is Pending. What happened, and how do you prove it in two commands?" Answer in three sentences.</p>
+<textarea rows="5"></textarea>
+<details class="model"><summary>Compare with a model answer</summary>
+<p>The second pod was refused at admission, almost always by a ResourceQuota, so it was never created and never reached the scheduler, which is why nothing is Pending. I would list the namespace's events filtered to FailedCreate, which carry the exceeded quota message with requested, used, and limited, then describe the quota to compare Used against Hard. The fix is either a smaller request from the tenant or a Quota change from the Infra Admin, and the ReplicaSet retries on its own once either lands.</p>
+</details>
+</div>
+</section>
+
+<footer>
+<p>Forge labs · <a href="index.html">dashboard</a> · Live check buttons need the repo served locally: <code>python3 -m http.server</code> from the repo root, then open <code>http://localhost:8000/docs/labs/</code>.</p>
+</footer>
+</main>
+<script src="assets/lab.js"></script>
+</body>
+</html>
