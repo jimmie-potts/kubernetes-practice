@@ -501,12 +501,12 @@ spec:
   <text x="100" y="82" text-anchor="middle">ingress-nginx pod</text>
   <text class="small" x="100" y="98" text-anchor="middle">namespace ingress-nginx</text>
   <path class="arrow" style="marker-end:url(#arr3)" d="M192 85 H246"/>
-  <text class="small" x="219" y="78" text-anchor="middle">allow</text>
+  <text class="small" x="219" y="74" text-anchor="middle">allow</text>
   <rect class="box" x="470" y="60" width="160" height="50"/>
   <text x="550" y="82" text-anchor="middle">jarvis pod</text>
   <text class="small" x="550" y="98" text-anchor="middle">namespace tnt-stark</text>
   <path class="arrow" style="marker-end:url(#arr3)" d="M466 85 H414"/>
-  <text class="small" x="440" y="78" text-anchor="middle">drop</text>
+  <text class="small" x="440" y="74" text-anchor="middle">drop</text>
   <path class="arrow" style="marker-end:url(#arr3)" d="M330 112 V126"/>
 </svg>
 <figcaption>Acme's wall: default deny on every pod, with two holes that add up, one for pods in the same namespace and one for the ingress-nginx namespace. A jarvis pod matches neither hole, so its packets are dropped.</figcaption>
