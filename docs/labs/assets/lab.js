@@ -10,7 +10,7 @@
   var steps = Array.prototype.slice.call(document.querySelectorAll('section.step'));
   var chip = document.getElementById('progress');
   function updateProgress() {
-    var done = document.querySelectorAll('section.step input.step-done:checked').length;
+    var done = document.querySelectorAll('section.step.done').length;
     if (chip) chip.textContent = done + '/' + steps.length + ' steps done';
     store('progress', JSON.stringify({ done: done, total: steps.length }));
   }
